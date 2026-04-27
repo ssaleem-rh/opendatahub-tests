@@ -194,3 +194,239 @@ class TestPostUpgradeTrustyAIService:
             token=current_client_token,
             metric_name=TrustyAIServiceMetrics.Drift.MEANSHIFT,
         )
+
+
+@pytest.mark.parametrize(
+    "model_namespace, minio_pod, minio_data_connection, trustyai_service",
+    [
+        pytest.param(
+            {"name": "test-trustyaiservice-db-upgrade"},
+            MinIo.PodConfig.MODEL_MESH_MINIO_CONFIG,
+            {"bucket": MinIo.Buckets.MODELMESH_EXAMPLE_MODELS},
+            {"storage": "db"},
+        )
+    ],
+    indirect=True,
+)
+@pytest.mark.rawdeployment
+@pytest.mark.usefixtures("minio_pod")
+class TestPreUpgradeTrustyAIServiceDB:
+    """Pre-upgrade tests for TrustyAI Service with DB storage from the start."""
+
+    @pytest.mark.pre_upgrade
+    def test_trustyai_service_db_credentials_exist(
+        self,
+        admin_client,
+        model_namespace,
+        minio_data_connection,
+        trustyai_service,
+        db_credentials_secret,
+        mariadb,
+    ) -> None:
+        """Verify db-credentials secret exists and is properly configured before running upgrade tests."""
+        # Verify the secret exists (using the fixture directly)
+        assert db_credentials_secret.exists, f"db-credentials secret does not exist in namespace {model_namespace.name}"
+
+        # Verify the secret has the required keys
+        required_keys = {
+            "databaseKind",
+            "databaseName",
+            "databaseUsername",
+            "databasePassword",
+            "databaseService",
+            "databasePort",
+            "databaseGeneration",
+        }
+        secret_data = db_credentials_secret.instance.data
+        assert secret_data is not None, "db-credentials secret has no data"
+
+        # Get actual keys from secret
+        actual_keys = set(secret_data.keys())
+        missing_keys = required_keys - actual_keys
+
+        assert not missing_keys, (
+            f"db-credentials secret is missing required keys: {missing_keys}. Available keys: {actual_keys}"
+        )
+
+        # Verify MariaDB is running
+        assert mariadb.exists, "MariaDB instance does not exist"
+
+    @pytest.mark.pre_upgrade
+    def test_trustyai_service_db_pre_upgrade_inference(
+        self,
+        admin_client,
+        current_client_token,
+        model_namespace,
+        isvc_getter_token,
+        trustyai_service,
+        gaussian_credit_model,
+    ) -> None:
+        """Send inference data and verify observations are registered by TrustyAI with DB storage."""
+        send_inferences_and_verify_trustyai_service_registered(
+            client=admin_client,
+            token=current_client_token,
+            data_path=f"{DRIFT_BASE_DATA_PATH}/data_batches",
+            trustyai_service=trustyai_service,
+            inference_service=gaussian_credit_model,
+            inference_config=OPENVINO_KSERVE_INFERENCE_CONFIG,
+            inference_token=isvc_getter_token,
+        )
+
+    @pytest.mark.pre_upgrade
+    def test_trustyai_service_db_pre_upgrade_data_upload(
+        self,
+        admin_client,
+        minio_data_connection,
+        current_client_token,
+        trustyai_service,
+    ) -> None:
+        """Upload reference/training data to TrustyAI service configured with DB storage and verify it exists."""
+        verify_upload_data_to_trustyai_service(
+            client=admin_client,
+            trustyai_service=trustyai_service,
+            token=current_client_token,
+            data_path=f"{DRIFT_BASE_DATA_PATH}/training_data.json",
+        )
+
+    @pytest.mark.pre_upgrade
+    def test_trustyai_service_db_pre_upgrade_drift_metric_schedule_meanshift(
+        self,
+        admin_client,
+        current_client_token,
+        trustyai_service,
+        gaussian_credit_model,
+    ) -> None:
+        """Schedule a mean shift drift metric to be calculated before upgrade so it can be verified post-upgrade."""
+        verify_trustyai_service_metric_scheduling_request(
+            client=admin_client,
+            trustyai_service=trustyai_service,
+            token=current_client_token,
+            metric_name=TrustyAIServiceMetrics.Drift.MEANSHIFT,
+            json_data={
+                "modelId": "gaussian-credit-model",
+                "referenceTag": "TRAINING",
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "model_namespace, minio_pod, minio_data_connection, trustyai_service",
+    [
+        pytest.param(
+            {"name": "test-trustyaiservice-db-upgrade"},
+            MinIo.PodConfig.MODEL_MESH_MINIO_CONFIG,
+            {"bucket": MinIo.Buckets.MODELMESH_EXAMPLE_MODELS},
+            {"storage": "db"},
+        )
+    ],
+    indirect=True,
+)
+@pytest.mark.rawdeployment
+@pytest.mark.usefixtures("minio_pod")
+class TestPostUpgradeTrustyAIServiceDB:
+    """Post-upgrade tests for TrustyAI Service with DB storage persistence."""
+
+    @pytest.mark.post_upgrade
+    def test_trustyai_service_db_credentials_survived_upgrade(
+        self,
+        admin_client,
+        model_namespace,
+        minio_data_connection,
+        trustyai_service,
+    ) -> None:
+        """Verify db-credentials secret survived the upgrade process."""
+        from ocp_resources.maria_db import MariaDB
+        from ocp_resources.secret import Secret
+
+        # Verify the secret still exists after upgrade
+        secret = Secret(
+            client=admin_client,
+            name="db-credentials",
+            namespace=model_namespace.name,
+            ensure_exists=True,
+        )
+        assert secret.exists, (
+            f"CRITICAL: db-credentials secret does not exist in namespace {model_namespace.name} after upgrade. "
+            f"This indicates the secret was deleted during the upgrade process."
+        )
+
+        # Verify the secret still has the required keys
+        required_keys = {
+            "databaseKind",
+            "databaseName",
+            "databaseUsername",
+            "databasePassword",
+            "databaseService",
+            "databasePort",
+            "databaseGeneration",
+        }
+        secret_data = secret.instance.data
+        assert secret_data is not None, "CRITICAL: db-credentials secret has no data after upgrade"
+
+        # Get actual keys from secret
+        actual_keys = set(secret_data.keys())
+        missing_keys = required_keys - actual_keys
+
+        assert not missing_keys, (
+            f"CRITICAL: db-credentials secret is missing required keys: {missing_keys} after upgrade. "
+            f"Secret may have been corrupted during upgrade. Available keys: {actual_keys}"
+        )
+
+        # Verify MariaDB still exists
+        mariadb = MariaDB(
+            client=admin_client,
+            name="mariadb",
+            namespace=model_namespace.name,
+            ensure_exists=True,
+        )
+        assert mariadb.exists, (
+            f"CRITICAL: MariaDB instance does not exist in namespace {model_namespace.name} after upgrade. "
+            f"Database was likely deleted during upgrade."
+        )
+
+    @pytest.mark.dependency(name="db_verify_persistence")
+    @pytest.mark.post_upgrade
+    def test_trustyai_service_db_post_upgrade_preexisting_metric_can_be_deleted(
+        self,
+        admin_client,
+        minio_data_connection,
+        current_client_token,
+        trustyai_db_ca_secret,
+        trustyai_service,
+    ) -> None:
+        """Verify drift metric scheduled pre-upgrade still exists after upgrade by deleting it."""
+        verify_trustyai_service_metric_delete_request(
+            client=admin_client,
+            trustyai_service=trustyai_service,
+            token=current_client_token,
+            metric_name=TrustyAIServiceMetrics.Drift.MEANSHIFT,
+        )
+
+    @pytest.mark.dependency(depends=["db_verify_persistence"])
+    @pytest.mark.post_upgrade
+    def test_trustyai_service_db_post_upgrade_new_metric_schedule_and_cleanup(
+        self,
+        admin_client,
+        current_client_token,
+        trustyai_db_ca_secret,
+        trustyai_service,
+        gaussian_credit_model,
+    ) -> None:
+        """Schedule a new metric after upgrade and clean it up to verify DB storage works post-upgrade."""
+        verify_trustyai_service_metric_scheduling_request(
+            client=admin_client,
+            trustyai_service=trustyai_service,
+            token=current_client_token,
+            metric_name=TrustyAIServiceMetrics.Drift.KSTEST,
+            json_data={
+                "modelId": "gaussian-credit-model",
+                "referenceTag": "TRAINING",
+            },
+        )
+
+        verify_trustyai_service_metric_delete_request(
+            client=admin_client,
+            trustyai_service=trustyai_service,
+            token=current_client_token,
+            metric_name=TrustyAIServiceMetrics.Drift.KSTEST,
+        )

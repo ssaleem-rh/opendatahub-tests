@@ -170,77 +170,126 @@ def user_workload_monitoring_config(admin_client: DynamicClient) -> Generator[Co
 
 
 @pytest.fixture(scope="class")
-def db_credentials_secret(admin_client: DynamicClient, model_namespace: Namespace) -> Generator[Secret, Any, Any]:
-    with Secret(
-        client=admin_client,
-        name=DB_CREDENTIALS_SECRET_NAME,
-        namespace=model_namespace.name,
-        string_data={
-            "databaseKind": MARIADB,
-            "databaseName": DB_NAME,
-            "databaseUsername": DB_USERNAME,
-            "databasePassword": DB_PASSWORD,
-            "databaseService": MARIADB,
-            "databasePort": "3306",
-            "databaseGeneration": "update",
-        },
-    ) as db_credentials:
-        yield db_credentials
+def db_credentials_secret(
+    pytestconfig: pytest.Config,
+    admin_client: DynamicClient,
+    model_namespace: Namespace,
+    teardown_resources: bool,
+) -> Generator[Secret, Any, Any]:
+    if pytestconfig.option.post_upgrade:
+        # Post-upgrade: reference existing secret, don't create
+        secret = Secret(
+            client=admin_client,
+            name=DB_CREDENTIALS_SECRET_NAME,
+            namespace=model_namespace.name,
+            ensure_exists=True,
+        )
+        yield secret
+        secret.clean_up()
+    else:
+        # Pre-upgrade: create new secret
+        with Secret(
+            client=admin_client,
+            name=DB_CREDENTIALS_SECRET_NAME,
+            namespace=model_namespace.name,
+            string_data={
+                "databaseKind": MARIADB,
+                "databaseName": DB_NAME,
+                "databaseUsername": DB_USERNAME,
+                "databasePassword": DB_PASSWORD,
+                "databaseService": MARIADB,
+                "databasePort": "3306",
+                "databaseGeneration": "update",
+            },
+            teardown=teardown_resources,
+        ) as db_credentials:
+            yield db_credentials
 
 
 @pytest.fixture(scope="class")
 def mariadb(
+    pytestconfig: pytest.Config,
     admin_client: DynamicClient,
     model_namespace: Namespace,
     db_credentials_secret: Secret,
     mariadb_operator_cr: MariadbOperator,
+    teardown_resources: bool,
 ) -> Generator[MariaDB, Any, Any]:
-    mariadb_csv: ClusterServiceVersion = get_cluster_service_version(
-        client=admin_client, prefix=MARIADB, namespace=OPENSHIFT_OPERATORS
-    )
-    alm_examples: list[dict[str, Any]] = mariadb_csv.get_alm_examples()
-    mariadb_dict: dict[str, Any] = next((example for example in alm_examples if example["kind"] == "MariaDB"), None)
-
-    if not mariadb_dict:
-        raise ResourceNotFoundError(f"No MariaDB dict found in alm_examples for CSV {mariadb_csv.name}")
-
-    mariadb_dict["metadata"]["namespace"] = model_namespace.name
-    mariadb_dict["spec"]["database"] = DB_NAME
-    mariadb_dict["spec"]["username"] = DB_USERNAME
-
-    mariadb_dict["spec"]["replicas"] = 1
-
-    # Need to fix MariaDB version due to an issue with the default version in certain environments
-    # Using the same registry and image used by the MariaDB operator
-    # --just changing the tag to point to a stable version
-    mariadb_dict["spec"]["image"] = "docker-registry1.mariadb.com/library/mariadb:10.11.8"
-    mariadb_dict["spec"]["galera"]["enabled"] = False
-    mariadb_dict["spec"]["metrics"]["enabled"] = False
-    mariadb_dict["spec"]["tls"] = {"enabled": True, "required": True}
-
-    password_secret_key_ref = {"generate": False, "key": "databasePassword", "name": DB_CREDENTIALS_SECRET_NAME}
-
-    mariadb_dict["spec"]["rootPasswordSecretKeyRef"] = password_secret_key_ref
-    mariadb_dict["spec"]["passwordSecretKeyRef"] = password_secret_key_ref
-    with MariaDB(kind_dict=mariadb_dict) as mariadb:
-        wait_for_mariadb_pods(client=admin_client, mariadb=mariadb)
+    if pytestconfig.option.post_upgrade:
+        # Post-upgrade: reference existing MariaDB, don't create
+        mariadb = MariaDB(
+            client=admin_client,
+            name="mariadb",
+            namespace=model_namespace.name,
+            ensure_exists=True,
+        )
         yield mariadb
+        mariadb.clean_up()
+    else:
+        # Pre-upgrade: create new MariaDB
+        mariadb_csv: ClusterServiceVersion = get_cluster_service_version(
+            client=admin_client, prefix=MARIADB, namespace=OPENSHIFT_OPERATORS
+        )
+        alm_examples: list[dict[str, Any]] = mariadb_csv.get_alm_examples()
+        mariadb_dict: dict[str, Any] = next((example for example in alm_examples if example["kind"] == "MariaDB"), None)
+
+        if not mariadb_dict:
+            raise ResourceNotFoundError(f"No MariaDB dict found in alm_examples for CSV {mariadb_csv.name}")
+
+        mariadb_dict["metadata"]["namespace"] = model_namespace.name
+        mariadb_dict["spec"]["database"] = DB_NAME
+        mariadb_dict["spec"]["username"] = DB_USERNAME
+
+        mariadb_dict["spec"]["replicas"] = 1
+
+        # Need to fix MariaDB version due to an issue with the default version in certain environments
+        # Using the same registry and image used by the MariaDB operator
+        # --just changing the tag to point to a stable version
+        mariadb_dict["spec"]["image"] = "docker-registry1.mariadb.com/library/mariadb:10.11.8"
+        mariadb_dict["spec"]["galera"]["enabled"] = False
+        mariadb_dict["spec"]["metrics"]["enabled"] = False
+        mariadb_dict["spec"]["tls"] = {"enabled": True, "required": True}
+
+        password_secret_key_ref = {"generate": False, "key": "databasePassword", "name": DB_CREDENTIALS_SECRET_NAME}
+
+        mariadb_dict["spec"]["rootPasswordSecretKeyRef"] = password_secret_key_ref
+        mariadb_dict["spec"]["passwordSecretKeyRef"] = password_secret_key_ref
+        with MariaDB(kind_dict=mariadb_dict, teardown=teardown_resources) as mariadb:
+            wait_for_mariadb_pods(client=admin_client, mariadb=mariadb)
+            yield mariadb
 
 
 @pytest.fixture(scope="class")
 def trustyai_db_ca_secret(
-    admin_client: DynamicClient, model_namespace: Namespace, mariadb: MariaDB
+    pytestconfig: pytest.Config,
+    admin_client: DynamicClient,
+    model_namespace: Namespace,
+    mariadb: MariaDB,
+    teardown_resources: bool,
 ) -> Generator[Secret, Any]:
-    mariadb_ca_secret = Secret(
-        client=admin_client, name=f"{mariadb.name}-ca", namespace=model_namespace.name, ensure_exists=True
-    )
-    with Secret(
-        client=admin_client,
-        name=f"{TRUSTYAI_SERVICE_NAME}-db-ca",
-        namespace=model_namespace.name,
-        data_dict={"ca.crt": mariadb_ca_secret.instance.data["ca.crt"]},
-    ) as secret:
+    if pytestconfig.option.post_upgrade:
+        # Post-upgrade: reference existing secret, don't create
+        secret = Secret(
+            client=admin_client,
+            name=f"{TRUSTYAI_SERVICE_NAME}-db-ca",
+            namespace=model_namespace.name,
+            ensure_exists=True,
+        )
         yield secret
+        secret.clean_up()
+    else:
+        # Pre-upgrade: create new secret from MariaDB CA
+        mariadb_ca_secret = Secret(
+            client=admin_client, name=f"{mariadb.name}-ca", namespace=model_namespace.name, ensure_exists=True
+        )
+        with Secret(
+            client=admin_client,
+            name=f"{TRUSTYAI_SERVICE_NAME}-db-ca",
+            namespace=model_namespace.name,
+            data_dict={"ca.crt": mariadb_ca_secret.instance.data["ca.crt"]},
+            teardown=teardown_resources,
+        ) as secret:
+            yield secret
 
 
 @pytest.fixture(scope="class")
@@ -322,17 +371,21 @@ def gaussian_credit_model(
 
 @pytest.fixture(scope="class")
 def isvc_getter_service_account(
-    admin_client: DynamicClient, model_namespace: Namespace
+    admin_client: DynamicClient, model_namespace: Namespace, teardown_resources: bool
 ) -> Generator[ServiceAccount, Any, Any]:
     with create_isvc_getter_service_account(
-        client=admin_client, namespace=model_namespace, name=ISVC_GETTER
+        client=admin_client, namespace=model_namespace, name=ISVC_GETTER, teardown=teardown_resources
     ) as service_account:
         yield service_account
 
 
 @pytest.fixture(scope="class")
-def isvc_getter_role(admin_client: DynamicClient, model_namespace: Namespace) -> Generator[Role, Any, Any]:
-    with create_isvc_getter_role(client=admin_client, namespace=model_namespace, name=ISVC_GETTER) as role:
+def isvc_getter_role(
+    admin_client: DynamicClient, model_namespace: Namespace, teardown_resources: bool
+) -> Generator[Role, Any, Any]:
+    with create_isvc_getter_role(
+        client=admin_client, namespace=model_namespace, name=ISVC_GETTER, teardown=teardown_resources
+    ) as role:
         yield role
 
 
@@ -342,6 +395,7 @@ def isvc_getter_role_binding(
     model_namespace: Namespace,
     isvc_getter_role: Role,
     isvc_getter_service_account: ServiceAccount,
+    teardown_resources: bool,
 ) -> Generator[RoleBinding, Any, Any]:
     with create_isvc_getter_role_binding(
         client=admin_client,
@@ -349,6 +403,7 @@ def isvc_getter_role_binding(
         role=isvc_getter_role,
         service_account=isvc_getter_service_account,
         name=ISVC_GETTER,
+        teardown=teardown_resources,
     ) as role_binding:
         yield role_binding
 
@@ -359,12 +414,14 @@ def isvc_getter_token_secret(
     model_namespace: Namespace,
     isvc_getter_service_account: ServiceAccount,
     isvc_getter_role_binding: RoleBinding,
+    teardown_resources: bool,
 ) -> Generator[Secret, Any, Any]:
     with create_isvc_getter_token_secret(
         client=admin_client,
         name="sa-token",
         namespace=model_namespace,
         service_account=isvc_getter_service_account,
+        teardown=teardown_resources,
     ) as secret:
         yield secret
 
