@@ -22,7 +22,6 @@ deterministic inadmissible state without relying on quota-exhaustion timing.
 import pytest
 import structlog
 from kubernetes.dynamic import DynamicClient
-from ocp_resources.job import Job
 from ocp_resources.namespace import Namespace
 from ocp_resources.resource import ResourceEditor
 from ocp_resources.route import Route
@@ -30,8 +29,8 @@ from ocp_resources.service import Service
 from timeout_sampler import TimeoutExpiredError
 
 from tests.ai_safety.evalhub.utils import (
+    _log_job_kueue_labels,
     build_evalhub_job_payload,
-    evalhub_runtime_label_selector,
     submit_evalhub_job,
     wait_for_evalhub_job,
     wait_for_evalhub_job_workload_admitted,
@@ -40,32 +39,6 @@ from tests.ai_safety.evalhub.utils import (
 from utilities.kueue_utils import ClusterQueue, LocalQueue
 
 LOGGER = structlog.get_logger(name=__name__)
-
-KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
-
-
-def _log_job_kueue_labels(admin_client: DynamicClient, namespace: str, evalhub_job_id: str) -> None:
-    """Log the Kueue label on the Kubernetes Job created by EvalHub.
-
-    Kueue reads the queue-name from a Job LABEL (not annotation).
-    Helps diagnose whether EvalHub is propagating the queue-name label —
-    if the label is missing, Kueue will never create a Workload.
-    """
-    selector = evalhub_runtime_label_selector(evalhub_job_id=evalhub_job_id)
-    jobs = list(Job.get(client=admin_client, namespace=namespace, label_selector=selector))
-    if not jobs:
-        LOGGER.warning("No Kubernetes Job found for EvalHub job", evalhub_job_id=evalhub_job_id)
-        return
-    for job in jobs:
-        labels = job.instance.metadata.labels or {}
-        queue_label = labels.get(KUEUE_QUEUE_LABEL)
-        LOGGER.info(
-            "Kubernetes Job kueue label check",
-            job_name=job.name,
-            kueue_queue_name_label=queue_label,
-            has_kueue_label=queue_label is not None,
-            all_labels=dict(labels),
-        )
 
 
 def _kueue_payload(local_queue: LocalQueue, **kwargs) -> dict:

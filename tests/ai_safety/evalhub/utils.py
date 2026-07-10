@@ -675,6 +675,33 @@ def evalhub_runtime_label_selector(evalhub_job_id: str) -> str:
     )
 
 
+_KUEUE_QUEUE_NAME_LABEL: str = "kueue.x-k8s.io/queue-name"
+
+
+def _log_job_kueue_labels(admin_client: DynamicClient, namespace: str, evalhub_job_id: str) -> None:
+    """Log the Kueue queue-name label on the Kubernetes Job created by EvalHub.
+
+    Debugging helper called on test failure paths to diagnose whether EvalHub
+    propagated the Kueue queue-name label to the Job. Can be removed once
+    Kueue label propagation is stable.
+    """
+    selector = evalhub_runtime_label_selector(evalhub_job_id=evalhub_job_id)
+    jobs = list(Job.get(client=admin_client, namespace=namespace, label_selector=selector))
+    if not jobs:
+        LOGGER.warning("No Kubernetes Job found for EvalHub job", evalhub_job_id=evalhub_job_id)
+        return
+    for job in jobs:
+        labels = job.instance.metadata.labels or {}
+        queue_label = labels.get(_KUEUE_QUEUE_NAME_LABEL)
+        LOGGER.info(
+            "Kubernetes Job kueue label check",
+            job_name=job.name,
+            kueue_queue_name_label=queue_label,
+            has_kueue_label=queue_label is not None,
+            all_labels=dict(labels),
+        )
+
+
 def wait_for_evalhub_runtime_job_count(
     admin_client: DynamicClient,
     namespace: str,

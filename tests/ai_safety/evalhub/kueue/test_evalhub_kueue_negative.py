@@ -8,7 +8,6 @@ import pytest
 import requests
 import structlog
 from kubernetes.dynamic import DynamicClient
-from ocp_resources.job import Job
 from ocp_resources.namespace import Namespace
 from ocp_resources.resource import ResourceEditor
 from ocp_resources.route import Route
@@ -17,9 +16,9 @@ from timeout_sampler import TimeoutExpiredError
 
 from tests.ai_safety.evalhub.constants import EVALHUB_JOBS_PATH
 from tests.ai_safety.evalhub.utils import (
+    _log_job_kueue_labels,
     build_evalhub_job_payload,
     build_headers,
-    evalhub_runtime_label_selector,
     get_evalhub_job_http,
     submit_evalhub_job,
     wait_for_evalhub_job,
@@ -28,32 +27,6 @@ from tests.ai_safety.evalhub.utils import (
 from utilities.kueue_utils import ClusterQueue, LocalQueue, Workload
 
 LOGGER = structlog.get_logger(name=__name__)
-
-KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
-
-
-def _log_job_kueue_labels(admin_client: DynamicClient, namespace: str, evalhub_job_id: str) -> None:
-    """Log the Kueue labels and annotations on the Kubernetes Job created by EvalHub.
-
-    Kueue reads the queue-name from a Job LABEL (not annotation).
-    """
-    selector = evalhub_runtime_label_selector(evalhub_job_id=evalhub_job_id)
-    jobs = list(Job.get(client=admin_client, namespace=namespace, label_selector=selector))
-    if not jobs:
-        LOGGER.warning("No Kubernetes Job found for EvalHub job", evalhub_job_id=evalhub_job_id)
-        return
-    for job in jobs:
-        labels = job.instance.metadata.labels or {}
-        annotations = job.instance.metadata.annotations or {}
-        queue_label = labels.get(KUEUE_QUEUE_LABEL)
-        LOGGER.info(
-            "Kubernetes Job kueue label check",
-            job_name=job.name,
-            kueue_queue_name_label=queue_label,
-            has_kueue_label=queue_label is not None,
-            all_labels=dict(labels),
-            all_annotations=dict(annotations),
-        )
 
 
 @pytest.mark.kueue

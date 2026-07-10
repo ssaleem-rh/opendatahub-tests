@@ -26,6 +26,7 @@ from timeout_sampler import TimeoutExpiredError, TimeoutSampler
 
 from tests.ai_safety.evalhub.utils import (
     _get_evalhub_job_workload,
+    _log_job_kueue_labels,
     build_evalhub_job_payload,
     evalhub_runtime_label_selector,
     submit_evalhub_job,
@@ -35,30 +36,6 @@ from tests.ai_safety.evalhub.utils import (
 from utilities.kueue_utils import ClusterQueue, LocalQueue, check_gated_pods_and_running_pods
 
 LOGGER = structlog.get_logger(name=__name__)
-
-KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
-
-
-def _log_job_kueue_labels(admin_client: DynamicClient, namespace: str, evalhub_job_id: str) -> None:
-    """Log the Kueue labels on the Kubernetes Job created by EvalHub.
-
-    Debugging helper — can be removed once Kueue label propagation is stable.
-    """
-    selector = evalhub_runtime_label_selector(evalhub_job_id=evalhub_job_id)
-    jobs = list(Job.get(client=admin_client, namespace=namespace, label_selector=selector))
-    if not jobs:
-        LOGGER.warning("No Kubernetes Job found for EvalHub job", evalhub_job_id=evalhub_job_id)
-        return
-    for job in jobs:
-        labels = job.instance.metadata.labels or {}
-        queue_label = labels.get(KUEUE_QUEUE_LABEL)
-        LOGGER.info(
-            "Kubernetes Job kueue label check",
-            job_name=job.name,
-            kueue_queue_name_label=queue_label,
-            has_kueue_label=queue_label is not None,
-            all_labels=dict(labels),
-        )
 
 
 def _delete_k8s_job(admin_client: DynamicClient, namespace: str, evalhub_job_id: str) -> None:
