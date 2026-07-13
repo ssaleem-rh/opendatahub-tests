@@ -117,7 +117,7 @@ def evalhub_kueue_deployment(
         name=evalhub_kueue_cr.name,
         namespace=evalhub_kueue_namespace.name,
     )
-    deployment.wait_for_replicas(timeout=300)
+    deployment.wait_for_replicas(timeout=Timeout.TIMEOUT_10MIN)
     return deployment
 
 
@@ -476,7 +476,7 @@ def evalhub_kueue_vllm_emulator_deployment(
         },
         replicas=1,
     ) as deployment:
-        deployment.wait_for_replicas(timeout=300)
+        deployment.wait_for_replicas(timeout=Timeout.TIMEOUT_10MIN)
         yield deployment
 
 
