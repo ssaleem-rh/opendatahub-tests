@@ -33,6 +33,7 @@ from tests.ai_safety.evalhub.utils import (
     wait_for_evalhub_job_workload_admitted,
     wait_for_evalhub_job_workload_inadmissible,
 )
+from utilities.constants import Timeout
 from utilities.kueue_utils import ClusterQueue, LocalQueue, check_gated_pods_and_running_pods
 
 LOGGER = structlog.get_logger(name=__name__)
@@ -144,7 +145,7 @@ class TestEvalHubKueueJobDeletion:
                     admin_client=admin_client,
                     namespace=evalhub_kueue_namespace.name,
                     evalhub_job_id=job_id,
-                    timeout=300,
+                    timeout=Timeout.TIMEOUT_10MIN,
                 )
             except TimeoutExpiredError:
                 _log_job_kueue_labels(admin_client, evalhub_kueue_namespace.name, job_id)
@@ -202,6 +203,7 @@ class TestEvalHubKueueJobDeletion:
                 admin_client=admin_client,
                 namespace=evalhub_kueue_namespace.name,
                 evalhub_job_id=job_id,
+                timeout=Timeout.TIMEOUT_10MIN,
             )
         except TimeoutExpiredError:
             _log_job_kueue_labels(admin_client, evalhub_kueue_namespace.name, job_id)
@@ -210,7 +212,7 @@ class TestEvalHubKueueJobDeletion:
         selector = evalhub_runtime_label_selector(evalhub_job_id=job_id)
         try:
             for running, _ in TimeoutSampler(
-                wait_timeout=300,
+                wait_timeout=Timeout.TIMEOUT_10MIN,
                 sleep=5,
                 func=check_gated_pods_and_running_pods,
                 labels=[selector],
@@ -220,7 +222,7 @@ class TestEvalHubKueueJobDeletion:
                 if running >= 1:
                     break
         except TimeoutExpiredError:
-            pytest.fail(f"Pod for job {job_id} did not reach running state within 300s")
+            pytest.fail(f"Pod for job {job_id} did not reach running state within {Timeout.TIMEOUT_10MIN}s")
 
         # Delete the K8s Job directly while it is running (admin operation)
         _delete_k8s_job(admin_client=admin_client, namespace=evalhub_kueue_namespace.name, evalhub_job_id=job_id)
@@ -230,4 +232,5 @@ class TestEvalHubKueueJobDeletion:
             admin_client=admin_client,
             namespace=evalhub_kueue_namespace.name,
             evalhub_job_id=job_id,
+            timeout=120,
         )

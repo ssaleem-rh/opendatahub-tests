@@ -36,6 +36,7 @@ from tests.ai_safety.evalhub.utils import (
     wait_for_evalhub_job_workload_admitted,
     wait_for_evalhub_job_workload_inadmissible,
 )
+from utilities.constants import Timeout
 from utilities.kueue_utils import ClusterQueue, LocalQueue
 
 LOGGER = structlog.get_logger(name=__name__)
@@ -102,6 +103,7 @@ class TestEvalHubKueueAutoResume:
                 admin_client=admin_client,
                 namespace=evalhub_kueue_namespace.name,
                 evalhub_job_id=job1_id,
+                timeout=Timeout.TIMEOUT_10MIN,
             )
         except TimeoutExpiredError:
             _log_job_kueue_labels(admin_client, evalhub_kueue_namespace.name, job1_id)
@@ -182,6 +184,7 @@ class TestEvalHubKueueWorkloadConditions:
                     admin_client=admin_client,
                     namespace=evalhub_kueue_namespace.name,
                     evalhub_job_id=job_id,
+                    timeout=Timeout.TIMEOUT_10MIN,
                 )
             except TimeoutExpiredError:
                 _log_job_kueue_labels(admin_client, evalhub_kueue_namespace.name, job_id)

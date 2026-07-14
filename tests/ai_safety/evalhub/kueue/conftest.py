@@ -81,11 +81,26 @@ def _is_evalhub_crd_available(admin_client: DynamicClient) -> bool:
 # ---------------------------------------------------------------------------
 
 
-# Kueue-specific evalhub_mt_* fixtures (use evalhub_kueue_namespace instead of model_namespace)
+@pytest.fixture(scope="session")
+def evalhub_kueue_model_namespace(
+    admin_client: DynamicClient,
+) -> Generator[Namespace, Any, Any]:
+    """Namespace for the EvalHub CR and deployment.
+
+    Must NOT carry the evalhub tenant label — TrustyAI rejects EvalHub CRs
+    placed in a namespace marked as a tenant namespace.
+    """
+    with create_ns(
+        admin_client=admin_client,
+        name="test-evalhub-kueue-model",
+    ) as namespace:
+        yield namespace
+
+
 @pytest.fixture(scope="session")
 def evalhub_kueue_cr(
     admin_client: DynamicClient,
-    evalhub_kueue_namespace: Namespace,
+    evalhub_kueue_model_namespace: Namespace,
 ) -> Generator[EvalHub, Any, Any]:
     """Create an EvalHub CR for Kueue tests."""
     if not _is_evalhub_crd_available(admin_client):
@@ -97,7 +112,7 @@ def evalhub_kueue_cr(
     with EvalHub(
         client=admin_client,
         name="evalhub-mt",
-        namespace=evalhub_kueue_namespace.name,
+        namespace=evalhub_kueue_model_namespace.name,
         database={"type": "sqlite"},
         collections=["leaderboard-v2"],
         wait_for_resource=True,
@@ -108,14 +123,14 @@ def evalhub_kueue_cr(
 @pytest.fixture(scope="session")
 def evalhub_kueue_deployment(
     admin_client: DynamicClient,
-    evalhub_kueue_namespace: Namespace,
+    evalhub_kueue_model_namespace: Namespace,
     evalhub_kueue_cr: EvalHub,
 ) -> Deployment:
     """Wait for the EvalHub deployment to become available."""
     deployment = Deployment(
         client=admin_client,
         name=evalhub_kueue_cr.name,
-        namespace=evalhub_kueue_namespace.name,
+        namespace=evalhub_kueue_model_namespace.name,
     )
     deployment.wait_for_replicas(timeout=Timeout.TIMEOUT_10MIN)
     return deployment
@@ -124,14 +139,14 @@ def evalhub_kueue_deployment(
 @pytest.fixture(scope="session")
 def evalhub_kueue_route(
     admin_client: DynamicClient,
-    evalhub_kueue_namespace: Namespace,
+    evalhub_kueue_model_namespace: Namespace,
     evalhub_kueue_deployment: Deployment,
 ) -> Route:
     """Get the Route for the EvalHub service."""
     return Route(
         client=admin_client,
         name=evalhub_kueue_deployment.name,
-        namespace=evalhub_kueue_namespace.name,
+        namespace=evalhub_kueue_model_namespace.name,
         ensure_exists=True,
     )
 
