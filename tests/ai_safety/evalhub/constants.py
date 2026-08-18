@@ -105,6 +105,40 @@ PVC_TEST_DATA_NAME: str = "evalhub-test-data"
 PVC_TEST_DATA_SIZE: str = "2Gi"
 PVC_TOKENIZER_PATH: str = "/test_data/tokenizer"
 
+# Git storage test data (test_data_ref.git)
+# Runtime ABI between the operator-injected clone init container and the pod
+# (eval-hub: internal/eval_hub/runtimes/k8s/job_builders.go, cmd/eval_runtime_init).
+GIT_INIT_CONTAINER_NAME: str = "init"
+ENV_GIT_URL: str = "TEST_DATA_GIT_URL"
+ENV_GIT_REF: str = "TEST_DATA_GIT_REF"
+ENV_GIT_SUBPATH: str = "TEST_DATA_GIT_SUBPATH"
+
+# Valid, reachable public repo pinned to an immutable tag. A tag (or branch) gets a fast
+# shallow (depth=1) clone; GIT_DATASET_COMMIT is the exact commit that tag resolves to and is
+# what the run must record as resolved_sha. arc_easy fetches its dataset and the default
+# google/flan-t5-small tokenizer from HuggingFace, so no tokenizer needs to live in the repo.
+GIT_DATASET_REPO_URL: str = "https://github.com/EleutherAI/lm-evaluation-harness.git"
+GIT_DATASET_REF: str = "v0.4.12"  # immutable release tag; also used by the bad-sub_path test
+GIT_DATASET_COMMIT: str = (
+    "6d642546f4688648fced259eb3302efd36ece5af"  # commit v0.4.12 resolves to  # pragma: allowlist secret
+)
+
+# Negative cases.
+# Non-hex ref that is neither a branch nor a tag -> clone fails during ls-remote, before any
+# evaluation, with "not found as a branch or tag, and does not look like a commit SHA".
+GIT_INVALID_REF: str = "no-such-branch-does-not-exist"
+# Unreachable / nonexistent repo for the access-failure test (paired with bogus creds).
+GIT_UNREACHABLE_REPO_URL: str = "https://github.com/opendatahub-io/eval-git-private-does-not-exist.git"
+# Bad sub_path inside an otherwise-valid checkout: clone succeeds, staging fails with
+# "sub_path %q not found in repository".
+GIT_MISSING_SUBPATH: str = "definitely/not/a/real/path"
+
+# basic-auth Secret for the access-failure test. The password is a recognizable sentinel so
+# tests can assert it never leaks into job status or logs.
+GIT_CREDS_SECRET_NAME: str = "git-basic-auth-creds"
+GIT_SENTINEL_USERNAME: str = "sentinel-user"
+GIT_SENTINEL_PASSWORD: str = "SENTINEL-GIT-PAT-do-not-log-3f9c12ab"  # pragma: allowlist secret
+
 # Hardware profile
 EVALHUB_DEFAULT_HARDWARE_PROFILE: str = "default-profile"
 

@@ -43,6 +43,9 @@ from tests.ai_safety.evalhub.constants import (
     GARAK_PROVIDER_ID,
     GARAK_QUICK_BENCHMARK_ID,
     GARAK_SIMPLE_PROVIDER_ID,
+    GIT_CREDS_SECRET_NAME,
+    GIT_SENTINEL_PASSWORD,
+    GIT_SENTINEL_USERNAME,
     MINIO_MC_IMAGE,
     MINIO_UPLOADER_SECURITY_CONTEXT,
     OTEL_COLLECTOR_GRPC_PORT,
@@ -58,6 +61,7 @@ from tests.ai_safety.evalhub.constants import (
 from tests.ai_safety.evalhub.kueue.constants import VLLM_EMULATOR, VLLM_EMULATOR_IMAGE
 from tests.ai_safety.evalhub.utils import (
     MLflowWithWorkspaces,
+    build_git_job_payload,
     build_pvc_job_payload,
     delete_evalhub_job,
     submit_evalhub_job,
@@ -1812,3 +1816,78 @@ def submit_pvc_job(
             )
         except Exception:  # noqa: BLE001
             LOGGER.warning(f"Failed to delete PVC evaluation job {job_id} during teardown")
+
+
+@pytest.fixture()
+def git_basic_auth_secret(
+    admin_client: DynamicClient,
+    tenant_a_namespace: Namespace,
+) -> Generator[Secret, Any, Any]:
+    """Create a kubernetes.io/basic-auth Secret with a sentinel password for the access-failure test."""
+    with Secret(
+        client=admin_client,
+        name=GIT_CREDS_SECRET_NAME,
+        namespace=tenant_a_namespace.name,
+        type="kubernetes.io/basic-auth",
+        string_data={
+            "username": GIT_SENTINEL_USERNAME,
+            "password": GIT_SENTINEL_PASSWORD,
+        },
+    ) as secret:
+        yield secret
+
+
+@pytest.fixture()
+def submit_git_job(
+    tenant_a_token: str,
+    tenant_a_namespace: Namespace,
+    evalhub_mt_ca_bundle_file: str,
+    evalhub_mt_route: Route,
+    evalhub_vllm_emulator_service: Service,
+) -> Generator[Callable[..., str], Any, Any]:
+    """Factory fixture: submit git-backed evaluation jobs with guaranteed cleanup."""
+    job_ids: list[str] = []
+
+    def _submit(
+        url: str,
+        ref: str,
+        job_name: str = "git-test",
+        sub_path: str | None = None,
+        secret_ref: str | None = None,
+        tokenizer_path: str | None = None,
+    ) -> str:
+        payload = build_git_job_payload(
+            model_service_name=evalhub_vllm_emulator_service.name,
+            tenant_namespace=tenant_a_namespace.name,
+            job_name=job_name,
+            url=url,
+            ref=ref,
+            sub_path=sub_path,
+            secret_ref=secret_ref,
+            tokenizer_path=tokenizer_path,
+        )
+        data = submit_evalhub_job(
+            host=evalhub_mt_route.host,
+            token=tenant_a_token,
+            ca_bundle_file=evalhub_mt_ca_bundle_file,
+            tenant=tenant_a_namespace.name,
+            payload=payload,
+        )
+        job_id = data["resource"]["id"]
+        job_ids.append(job_id)
+        return job_id
+
+    yield _submit
+
+    for job_id in job_ids:
+        try:
+            delete_evalhub_job(
+                host=evalhub_mt_route.host,
+                token=tenant_a_token,
+                ca_bundle_file=evalhub_mt_ca_bundle_file,
+                tenant=tenant_a_namespace.name,
+                job_id=job_id,
+                hard_delete=True,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.warning(f"Failed to delete git evaluation job {job_id} during teardown")

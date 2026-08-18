@@ -9,6 +9,7 @@ from ocp_resources.config_map import ConfigMap
 from ocp_resources.evalhub import EvalHub
 from ocp_resources.job import Job
 from ocp_resources.mlflow import MLflow
+from ocp_resources.pod import Pod
 from ocp_resources.role_binding import RoleBinding
 from ocp_resources.service_account import ServiceAccount
 from timeout_sampler import TimeoutExpiredError, TimeoutSampler
@@ -36,6 +37,7 @@ from tests.ai_safety.evalhub.constants import (
     EVALHUB_VLLM_EMULATOR_PORT,
     GARAK_JOB_POLL_INTERVAL,
     GARAK_JOB_TIMEOUT,
+    GIT_INIT_CONTAINER_NAME,
 )
 from utilities.guardrails import get_auth_headers
 from utilities.kueue_utils import Workload
@@ -907,6 +909,107 @@ def build_pvc_job_payload(
         if tokenizer_path:
             benchmark["parameters"]["tokenizer"] = tokenizer_path
     return payload
+
+
+def build_git_test_data_ref(
+    url: str,
+    ref: str,
+    sub_path: str | None = None,
+    secret_ref: str | None = None,
+) -> dict:
+    """Build the test_data_ref.git portion of an EvalHub job payload."""
+    git_ref: dict[str, str] = {"url": url, "ref": ref}
+    if sub_path is not None:
+        git_ref["sub_path"] = sub_path
+    if secret_ref is not None:
+        git_ref["secret_ref"] = secret_ref
+    return {"git": git_ref}
+
+
+def build_git_job_payload(
+    model_service_name: str,
+    tenant_namespace: str,
+    job_name: str,
+    url: str,
+    ref: str,
+    sub_path: str | None = None,
+    secret_ref: str | None = None,
+    tokenizer_path: str | None = None,
+) -> dict:
+    """Build an EvalHub job payload with git-backed test data."""
+    payload = build_evalhub_job_payload(
+        model_service_name=model_service_name,
+        tenant_namespace=tenant_namespace,
+        job_name=job_name,
+    )
+    git_ref = build_git_test_data_ref(url=url, ref=ref, sub_path=sub_path, secret_ref=secret_ref)
+    for benchmark in payload["benchmarks"]:
+        benchmark["test_data_ref"] = git_ref
+        if tokenizer_path:
+            benchmark["parameters"]["tokenizer"] = tokenizer_path
+    return payload
+
+
+def find_resolved_sha(obj: Any) -> str | None:
+    """Recursively find the first non-empty resolved_sha in a job response."""
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if key == "resolved_sha" and isinstance(value, str) and value:
+                return value
+            found = find_resolved_sha(obj=value)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = find_resolved_sha(obj=item)
+            if found:
+                return found
+    return None
+
+
+def get_git_init_container(spec: Any) -> Any:
+    """Return the git clone init container from a batch Job pod spec."""
+    init_containers = spec.initContainers or []
+    return next((container for container in init_containers if container.name == GIT_INIT_CONTAINER_NAME), None)
+
+
+def get_job_status_message(job_data: dict) -> str:
+    """Extract the human-readable failure text from a job's status.
+
+    status.message is a dict {message, message_code, message_origin} on real responses,
+    but tolerate a plain string too.
+    """
+    message = (job_data.get("status", {}) or {}).get("message", "")
+    if isinstance(message, dict):
+        return message.get("message", "") or str(message)
+    return message or ""
+
+
+def capture_git_init_container_logs(admin_client: DynamicClient, batch_job: Any, timeout: int = 300) -> str:
+    """Capture the git clone init container's logs live, before the pod is garbage-collected.
+
+    The precise clone/staging error (e.g. "sub_path ... not found in repository") is written to
+    this container's stdout, not to the API status message or the adapter-only logs endpoint.
+    eval-hub removes the runtime pod once the job reaches a terminal state, so this polls the
+    Job's pod (via the standard job-name label) and grabs the log as soon as the init container
+    terminates.
+    """
+    namespace = batch_job.namespace
+    selector = f"job-name={batch_job.name}"
+    for _ in TimeoutSampler(wait_timeout=timeout, sleep=3, func=lambda: True):
+        for pod in Pod.get(client=admin_client, namespace=namespace, label_selector=selector):
+            init_statuses = pod.instance.status.initContainerStatuses or []
+            terminated = any(
+                status.name == GIT_INIT_CONTAINER_NAME and status.state and status.state.terminated is not None
+                for status in init_statuses
+            )
+            if terminated:
+                try:
+                    return pod.log(container=GIT_INIT_CONTAINER_NAME)
+                except Exception:  # noqa: BLE001 - pod may be racing GC
+                    LOGGER.warning(f"Could not read {GIT_INIT_CONTAINER_NAME!r} logs from pod {pod.name}")
+                    return ""
+    return ""
 
 
 def submit_evalhub_collection(
