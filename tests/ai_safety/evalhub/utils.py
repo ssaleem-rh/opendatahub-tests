@@ -950,6 +950,14 @@ def build_git_job_payload(
     return payload
 
 
+def build_s3_test_data_ref(bucket: str, key: str, secret_ref: str | None = None) -> dict:
+    """Build the test_data_ref.s3 portion of an EvalHub job payload."""
+    s3_ref: dict[str, str] = {"bucket": bucket, "key": key}
+    if secret_ref is not None:
+        s3_ref["secret_ref"] = secret_ref
+    return {"s3": s3_ref}
+
+
 def find_resolved_sha(obj: Any) -> str | None:
     """Recursively find the first non-empty resolved_sha in a job response."""
     if isinstance(obj, dict):

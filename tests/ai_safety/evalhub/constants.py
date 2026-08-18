@@ -112,6 +112,8 @@ GIT_INIT_CONTAINER_NAME: str = "init"
 ENV_GIT_URL: str = "TEST_DATA_GIT_URL"
 ENV_GIT_REF: str = "TEST_DATA_GIT_REF"
 ENV_GIT_SUBPATH: str = "TEST_DATA_GIT_SUBPATH"
+# Shared emptyDir the init container clones into and the adapter reads from.
+TEST_DATA_MOUNT_PATH: str = "/test_data"
 
 # Valid, reachable public repo pinned to an immutable tag. A tag (or branch) gets a fast
 # shallow (depth=1) clone; GIT_DATASET_COMMIT is the exact commit that tag resolves to and is
@@ -122,6 +124,8 @@ GIT_DATASET_REF: str = "v0.4.12"  # immutable release tag; also used by the bad-
 GIT_DATASET_COMMIT: str = (
     "6d642546f4688648fced259eb3302efd36ece5af"  # commit v0.4.12 resolves to  # pragma: allowlist secret
 )
+# Happy-path test needs a real fixture commit; if reset to all-zeros the test skips instead.
+GIT_FIXTURE_READY: bool = GIT_DATASET_COMMIT != "0" * 40
 
 # Negative cases.
 # Non-hex ref that is neither a branch nor a tag -> clone fails during ls-remote, before any
@@ -132,12 +136,21 @@ GIT_UNREACHABLE_REPO_URL: str = "https://github.com/opendatahub-io/eval-git-priv
 # Bad sub_path inside an otherwise-valid checkout: clone succeeds, staging fails with
 # "sub_path %q not found in repository".
 GIT_MISSING_SUBPATH: str = "definitely/not/a/real/path"
+# Valid sub_path that exists at GIT_DATASET_REF (the harness package dir): clone succeeds and
+# staging picks the subtree. arc_easy still sources its data from HuggingFace, so any real
+# directory is enough to prove the positive optional-sub_path path stages and the eval runs.
+GIT_VALID_SUBPATH: str = "lm_eval"
 
 # basic-auth Secret for the access-failure test. The password is a recognizable sentinel so
 # tests can assert it never leaks into job status or logs.
 GIT_CREDS_SECRET_NAME: str = "git-basic-auth-creds"
 GIT_SENTINEL_USERNAME: str = "sentinel-user"
 GIT_SENTINEL_PASSWORD: str = "SENTINEL-GIT-PAT-do-not-log-3f9c12ab"  # pragma: allowlist secret
+
+# Dummy S3 ref used only to build an invalid "both git and s3" test_data_ref (HLR-7). The
+# request must be rejected at validation before S3 is ever contacted, so these need not resolve.
+GIT_CONFLICT_S3_BUCKET: str = "evalhub-data"
+GIT_CONFLICT_S3_KEY: str = "unused/conflict-check.json"
 
 # Hardware profile
 EVALHUB_DEFAULT_HARDWARE_PROFILE: str = "default-profile"

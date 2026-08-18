@@ -1,35 +1,8 @@
 """Git repository as a storage source for evaluation provider test data.
 
-Covers the EvalHub ``test_data_ref.git`` integration. For Kubernetes Job runs the
-operator schedules an init container (named ``init``) on the evaluation pod that clones
-the configured repository at ``ref`` into the shared ``/test_data`` volume before the
-adapter runs; the resolved commit SHA is written to ``.git-metadata`` and surfaced as
-``resolved_sha`` on the job's ``test_data_ref`` for reproducibility.
-
-Schema (confirmed against eval-hub docs/src/components/schemas/TestDataRefGit.yaml)::
-
-    test_data_ref:
-      git:
-        url:        https://github.com/org/repo.git   # required, http(s) only (no ssh)
-        ref:        main | v1.2.0 | <full-or-abbrev SHA>   # required
-        sub_path:   datasets/lm-eval                   # optional; mounted at /test_data
-        secret_ref: my-git-credentials                 # optional; kubernetes.io/basic-auth
-
-Private repos reference a ``kubernetes.io/basic-auth`` Secret (username/password) in the
-job namespace via ``secret_ref``; credentials are never placed in the request body.
-
-Fixture repo: the happy-path test clones the public EleutherAI/lm-evaluation-harness repo
-pinned to the immutable release tag ``v0.4.12``. A tag (or branch) gets a shallow
-``depth=1`` clone, so this stays fast even though the repo has a large history; a raw
-commit SHA would force a full clone (eval-hub cmd/eval_runtime_init/git.go). arc_easy pulls
-its dataset and the ``google/flan-t5-small`` tokenizer from HuggingFace, so the cloned tree
-content is incidental — the test verifies clone-then-eval wiring and that the exact resolved
-commit is recorded. The run is capped to ~10 samples via the benchmark ``num_examples``
-default, so it is a quick smoke eval, not a full benchmark.
-
-Constants live in constants.py, the payload builders and log/status helpers in utils.py, and
-the ``git_basic_auth_secret``/``submit_git_job`` fixtures in conftest.py (next to the PVC
-equivalents).
+Covers the EvalHub ``test_data_ref.git`` integration: an init container clones the repo at
+``ref`` into the shared ``/test_data`` volume before the adapter runs. The happy path clones
+the public EleutherAI/lm-evaluation-harness repo pinned to the immutable tag ``v0.4.12``.
 """
 
 from collections.abc import Callable
@@ -39,26 +12,37 @@ from kubernetes.dynamic import DynamicClient
 from ocp_resources.namespace import Namespace
 from ocp_resources.route import Route
 from ocp_resources.secret import Secret
+from ocp_resources.service import Service
 
 from tests.ai_safety.evalhub.constants import (
     ENV_GIT_REF,
     ENV_GIT_SUBPATH,
     ENV_GIT_URL,
+    EVALHUB_LOG_ADAPTER_CONTAINER,
+    GIT_CONFLICT_S3_BUCKET,
+    GIT_CONFLICT_S3_KEY,
     GIT_DATASET_COMMIT,
     GIT_DATASET_REF,
     GIT_DATASET_REPO_URL,
+    GIT_FIXTURE_READY,
     GIT_INIT_CONTAINER_NAME,
     GIT_INVALID_REF,
     GIT_MISSING_SUBPATH,
     GIT_SENTINEL_PASSWORD,
     GIT_UNREACHABLE_REPO_URL,
+    GIT_VALID_SUBPATH,
+    TEST_DATA_MOUNT_PATH,
 )
 from tests.ai_safety.evalhub.utils import (
+    build_evalhub_job_payload,
+    build_git_test_data_ref,
+    build_s3_test_data_ref,
     capture_git_init_container_logs,
     find_resolved_sha,
     get_evalhub_job_logs_http,
     get_git_init_container,
     get_job_status_message,
+    post_evalhub_job_raw,
     validate_evalhub_job_completed,
     wait_for_evalhub_job,
     wait_for_evalhub_runtime_job_count,
@@ -66,10 +50,10 @@ from tests.ai_safety.evalhub.utils import (
 
 GIT_MODEL_NAMESPACE = pytest.param({"name": "test-evalhub-git-storage"})
 
-# The happy-path test needs a real fixture repo/tag (see docstring). If GIT_DATASET_COMMIT is
-# ever reset to the all-zeros placeholder, that test skips rather than reporting a product failure.
-_PLACEHOLDER_COMMIT: str = "0" * 40
-_GIT_FIXTURE_READY: bool = GIT_DATASET_COMMIT != _PLACEHOLDER_COMMIT
+FIXTURE_SKIP_REASON = (
+    "Fixture repo/commit not configured: set GIT_DATASET_REPO_URL/GIT_DATASET_REF (a real public "
+    "repo + immutable tag) and GIT_DATASET_COMMIT (the commit that tag resolves to)."
+)
 
 
 @pytest.mark.parametrize("model_namespace", [GIT_MODEL_NAMESPACE], indirect=True)
@@ -89,26 +73,17 @@ class TestEvalHubGitStorage:
     ) -> None:
         """Given a valid repository pinned to an immutable tag,
         when an evaluation job is submitted with test_data_ref.git,
-        then the init container clones successfully, the eval runs (a ~10-sample smoke),
-        and the run records the exact resolved commit.
-        """
-        if not _GIT_FIXTURE_READY:
-            pytest.skip(
-                "Fixture repo/commit not configured: set GIT_DATASET_REPO_URL/GIT_DATASET_REF "
-                "(a real public repo + immutable tag) and GIT_DATASET_COMMIT (the commit that tag "
-                "resolves to). See module docstring."
-            )
+        then the init container clones into the shared volume, the eval runs, and the exact
+        resolved commit is recorded."""
+        if not GIT_FIXTURE_READY:
+            pytest.skip(FIXTURE_SKIP_REASON)
 
-        # ref is the tag (fast shallow clone); the default google/flan-t5-small tokenizer and the
-        # arc_easy dataset come from HuggingFace, so no tokenizer_path override is needed.
         job_id = submit_git_job(
             url=GIT_DATASET_REPO_URL,
             ref=GIT_DATASET_REF,
             job_name="git-valid-commit",
         )
 
-        # The clone runs in an init container that stages the checkout into /test_data,
-        # wired with the git URL and ref via the runtime env ABI.
         batch_jobs = wait_for_evalhub_runtime_job_count(
             admin_client=admin_client,
             namespace=tenant_a_namespace.name,
@@ -119,7 +94,7 @@ class TestEvalHubGitStorage:
         init_container = get_git_init_container(spec=spec)
         assert init_container is not None, (
             f"Expected a git clone init container named {GIT_INIT_CONTAINER_NAME!r}, "
-            f"got: {[c.name for c in (spec.initContainers or [])]}"
+            f"got: {[container.name for container in (spec.initContainers or [])]}"
         )
         init_env = {env.name: env.value for env in (init_container.env or [])}
         assert init_env.get(ENV_GIT_URL) == GIT_DATASET_REPO_URL, (
@@ -127,6 +102,23 @@ class TestEvalHubGitStorage:
         )
         assert init_env.get(ENV_GIT_REF) == GIT_DATASET_REF, (
             f"Init container {ENV_GIT_REF} mismatch: {init_env.get(ENV_GIT_REF)!r}"
+        )
+
+        init_mounts = {mount.mountPath: mount.name for mount in (init_container.volumeMounts or [])}
+        assert TEST_DATA_MOUNT_PATH in init_mounts, (
+            f"init container must mount the shared test-data volume at {TEST_DATA_MOUNT_PATH}, got {init_mounts}"
+        )
+        shared_volume = init_mounts[TEST_DATA_MOUNT_PATH]
+        adapter_container = next(
+            (container for container in spec.containers if container.name == EVALHUB_LOG_ADAPTER_CONTAINER), None
+        )
+        assert adapter_container is not None, (
+            f"Expected an {EVALHUB_LOG_ADAPTER_CONTAINER!r} container, "
+            f"got: {[container.name for container in (spec.containers or [])]}"
+        )
+        adapter_mounts = {mount.name for mount in (adapter_container.volumeMounts or [])}
+        assert shared_volume in adapter_mounts, (
+            f"adapter must consume the same {shared_volume!r} volume the init container populated"
         )
 
         job_data = wait_for_evalhub_job(
@@ -137,14 +129,57 @@ class TestEvalHubGitStorage:
             job_id=job_id,
             timeout=600,
         )
-        # Clone succeeded and the eval ran to completion with benchmark metrics.
         validate_evalhub_job_completed(job_data=job_data)
 
-        # The run records the exact commit the tag resolves to, for reproducibility.
         resolved_sha = find_resolved_sha(obj=job_data)
         assert resolved_sha == GIT_DATASET_COMMIT, (
             f"Expected recorded resolved_sha {GIT_DATASET_COMMIT!r} (tag {GIT_DATASET_REF!r}), got {resolved_sha!r}"
         )
+
+    def test_valid_sub_path_stages_and_runs(
+        self,
+        admin_client: DynamicClient,
+        tenant_a_token: str,
+        tenant_a_namespace: Namespace,
+        evalhub_mt_ca_bundle_file: str,
+        evalhub_mt_route: Route,
+        submit_git_job: Callable[..., str],
+    ) -> None:
+        """Given a valid repository and an existing optional sub_path,
+        when the job is submitted,
+        then the sub_path subtree is staged and the evaluation completes."""
+        if not GIT_FIXTURE_READY:
+            pytest.skip(FIXTURE_SKIP_REASON)
+
+        job_id = submit_git_job(
+            url=GIT_DATASET_REPO_URL,
+            ref=GIT_DATASET_REF,
+            job_name="git-valid-subpath",
+            sub_path=GIT_VALID_SUBPATH,
+        )
+
+        batch_jobs = wait_for_evalhub_runtime_job_count(
+            admin_client=admin_client,
+            namespace=tenant_a_namespace.name,
+            evalhub_job_id=job_id,
+            minimum=1,
+        )
+        init_container = get_git_init_container(spec=batch_jobs[0].instance.spec.template.spec)
+        assert init_container is not None, "Expected a git clone init container for a sub_path job"
+        init_env = {env.name: env.value for env in (init_container.env or [])}
+        assert init_env.get(ENV_GIT_SUBPATH) == GIT_VALID_SUBPATH, (
+            f"Init container {ENV_GIT_SUBPATH} mismatch: {init_env.get(ENV_GIT_SUBPATH)!r}"
+        )
+
+        job_data = wait_for_evalhub_job(
+            host=evalhub_mt_route.host,
+            token=tenant_a_token,
+            ca_bundle_file=evalhub_mt_ca_bundle_file,
+            tenant=tenant_a_namespace.name,
+            job_id=job_id,
+            timeout=600,
+        )
+        validate_evalhub_job_completed(job_data=job_data)
 
     def test_invalid_git_reference_fails_cleanly(
         self,
@@ -156,8 +191,7 @@ class TestEvalHubGitStorage:
     ) -> None:
         """Given a nonexistent branch, tag, or commit,
         when the job is submitted,
-        then the job fails cleanly before the evaluation starts.
-        """
+        then it fails cleanly before the evaluation starts."""
         job_id = submit_git_job(
             url=GIT_DATASET_REPO_URL,
             ref=GIT_INVALID_REF,
@@ -175,20 +209,18 @@ class TestEvalHubGitStorage:
         state = job_data.get("status", {}).get("state")
         assert state == "failed", f"Job with an invalid git ref should fail, got state '{state}'"
 
-        # The configured benchmark is still echoed back on a failed job, but because the clone
-        # fails before evaluation, none of them carry metrics -> the eval never produced results.
         results = job_data.get("results", {}) or {}
-        benchmarks = results.get("benchmarks", []) or []
-        benchmarks_with_metrics = [b for b in benchmarks if b.get("metrics")]
+        benchmarks_with_metrics = [
+            benchmark for benchmark in (results.get("benchmarks") or []) if benchmark.get("metrics")
+        ]
         assert not benchmarks_with_metrics, (
             f"Evaluation must not produce metrics when the git ref is invalid, got: {benchmarks_with_metrics}"
         )
-
-        # No resolved commit is recorded for a clone that never succeeded.
         assert find_resolved_sha(obj=job_data) is None, "resolved_sha must not be recorded for a failed clone"
 
     def test_repository_access_failure_no_secret_leak(
         self,
+        admin_client: DynamicClient,
         tenant_a_token: str,
         tenant_a_namespace: Namespace,
         evalhub_mt_ca_bundle_file: str,
@@ -198,13 +230,43 @@ class TestEvalHubGitStorage:
     ) -> None:
         """Given a private/unreachable repo with invalid credentials,
         when the job is submitted,
-        then the clone fails and no secrets leak into logs or status.
-        """
+        then the credential Secret is isolated to the init container and no secret leaks into
+        status or logs."""
         job_id = submit_git_job(
             url=GIT_UNREACHABLE_REPO_URL,
             ref=GIT_DATASET_REF,
             job_name="git-access-failure",
             secret_ref=git_basic_auth_secret.name,
+        )
+
+        batch_jobs = wait_for_evalhub_runtime_job_count(
+            admin_client=admin_client,
+            namespace=tenant_a_namespace.name,
+            evalhub_job_id=job_id,
+            minimum=1,
+        )
+        spec = batch_jobs[0].instance.spec.template.spec
+        creds_volumes = [
+            volume.name
+            for volume in (spec.volumes or [])
+            if volume.secret and volume.secret.secretName == git_basic_auth_secret.name
+        ]
+        assert creds_volumes, (
+            f"Expected a volume backed by Secret {git_basic_auth_secret.name!r}, "
+            f"got volumes: {[volume.name for volume in (spec.volumes or [])]}"
+        )
+        creds_volume = creds_volumes[0]
+        init_container = get_git_init_container(spec=spec)
+        assert init_container is not None, "Expected a git clone init container to mount the credential Secret"
+        init_mounted = {mount.name for mount in (init_container.volumeMounts or [])}
+        assert creds_volume in init_mounted, f"credential Secret {creds_volume!r} must be mounted on the init container"
+        adapter_container = next(
+            (container for container in spec.containers if container.name == EVALHUB_LOG_ADAPTER_CONTAINER), None
+        )
+        assert adapter_container is not None, f"Expected an {EVALHUB_LOG_ADAPTER_CONTAINER!r} container"
+        adapter_mounted = {mount.name for mount in (adapter_container.volumeMounts or [])}
+        assert creds_volume not in adapter_mounted, (
+            f"credential Secret {creds_volume!r} must NOT be mounted on the {EVALHUB_LOG_ADAPTER_CONTAINER!r} container"
         )
 
         job_data = wait_for_evalhub_job(
@@ -218,10 +280,8 @@ class TestEvalHubGitStorage:
         state = job_data.get("status", {}).get("state")
         assert state == "failed", f"Job against an unreachable/private repo should fail, got '{state}'"
 
-        # The credential value must never appear in the status payload...
         assert GIT_SENTINEL_PASSWORD not in str(job_data), "Credential value leaked into job status"
 
-        # ...nor in the aggregated job logs.
         logs_response = get_evalhub_job_logs_http(
             host=evalhub_mt_route.host,
             token=tenant_a_token,
@@ -242,8 +302,7 @@ class TestEvalHubGitStorage:
     ) -> None:
         """Given a repo that clones successfully but a sub_path that is absent,
         when the job runs,
-        then the evaluation fails with a precise data-related error.
-        """
+        then the evaluation fails with a precise data-related error."""
         job_id = submit_git_job(
             url=GIT_DATASET_REPO_URL,
             ref=GIT_DATASET_REF,
@@ -251,7 +310,6 @@ class TestEvalHubGitStorage:
             sub_path=GIT_MISSING_SUBPATH,
         )
 
-        # The clone init container is still injected; only the sub_path staging fails.
         batch_jobs = wait_for_evalhub_runtime_job_count(
             admin_client=admin_client,
             namespace=tenant_a_namespace.name,
@@ -266,10 +324,8 @@ class TestEvalHubGitStorage:
             f"Init container {ENV_GIT_SUBPATH} mismatch: {init_env.get(ENV_GIT_SUBPATH)!r}"
         )
 
-        # The clone succeeds; only sub_path staging fails. The precise data/path error is written
-        # to the init container's stdout (not the generic API status message nor the adapter-only
-        # logs endpoint), and eval-hub removes the pod once the job is terminal - so capture the
-        # init logs live, as soon as the init container terminates.
+        # The precise staging error lands in the init container's stdout, and the pod is GC'd once
+        # the job is terminal, so capture the init logs live before waiting for completion.
         init_logs = capture_git_init_container_logs(admin_client=admin_client, batch_job=batch_job)
 
         job_data = wait_for_evalhub_job(
@@ -283,18 +339,53 @@ class TestEvalHubGitStorage:
         state = job_data.get("status", {}).get("state")
         assert state == "failed", f"Job with a missing sub_path should fail, got '{state}'"
 
-        # The evaluation never produced results - the failure is a data/staging error, not an eval error.
         benchmarks_with_metrics = [
-            b for b in (job_data.get("results", {}) or {}).get("benchmarks", []) if b.get("metrics")
+            benchmark
+            for benchmark in ((job_data.get("results", {}) or {}).get("benchmarks") or [])
+            if benchmark.get("metrics")
         ]
         assert not benchmarks_with_metrics, (
             f"Evaluation must not produce metrics on a bad sub_path: {benchmarks_with_metrics}"
         )
 
-        # The init container's own error names the missing sub_path precisely.
         status_message = get_job_status_message(job_data=job_data)
         haystack = f"{init_logs}\n{status_message}".lower()
         assert "sub_path" in haystack and "not found" in haystack, (
             "Expected a precise data-related error naming the missing sub_path.\n"
             f"init logs: {init_logs!r}\nstatus message: {status_message!r}"
+        )
+
+    def test_conflicting_git_and_s3_refs_rejected(
+        self,
+        tenant_a_token: str,
+        tenant_a_namespace: Namespace,
+        evalhub_mt_ca_bundle_file: str,
+        evalhub_mt_route: Route,
+        evalhub_vllm_emulator_service: Service,
+    ) -> None:
+        """Given a job whose test_data_ref sets both git and s3,
+        when it is submitted,
+        then the API rejects it (exactly one source is allowed) and no job is created."""
+        payload = build_evalhub_job_payload(
+            model_service_name=evalhub_vllm_emulator_service.name,
+            tenant_namespace=tenant_a_namespace.name,
+            job_name="git-s3-conflict",
+        )
+        conflicting_ref = {
+            **build_git_test_data_ref(url=GIT_DATASET_REPO_URL, ref=GIT_DATASET_REF),
+            **build_s3_test_data_ref(bucket=GIT_CONFLICT_S3_BUCKET, key=GIT_CONFLICT_S3_KEY),
+        }
+        for benchmark in payload["benchmarks"]:
+            benchmark["test_data_ref"] = conflicting_ref
+
+        response = post_evalhub_job_raw(
+            host=evalhub_mt_route.host,
+            token=tenant_a_token,
+            ca_bundle_file=evalhub_mt_ca_bundle_file,
+            tenant=tenant_a_namespace.name,
+            payload=payload,
+        )
+        assert 400 <= response.status_code < 500, (
+            f"A job specifying both git and s3 test_data_ref must be rejected with a 4xx, "
+            f"got {response.status_code}: {response.text}"
         )
