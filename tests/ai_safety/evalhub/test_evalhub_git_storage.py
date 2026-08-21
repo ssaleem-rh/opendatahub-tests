@@ -28,6 +28,7 @@ from tests.ai_safety.evalhub.constants import (
     GIT_INIT_CONTAINER_NAME,
     GIT_INVALID_REF,
     GIT_MISSING_SUBPATH,
+    GIT_NON_HTTPS_URLS,
     GIT_SENTINEL_PASSWORD,
     GIT_UNREACHABLE_REPO_URL,
     GIT_VALID_SUBPATH,
@@ -389,3 +390,67 @@ class TestEvalHubGitStorage:
             f"A job specifying both git and s3 test_data_ref must be rejected with a 4xx, "
             f"got {response.status_code}: {response.text}"
         )
+
+    @pytest.mark.parametrize(
+        "non_https_url",
+        [pytest.param(url, id=scheme) for scheme, url in GIT_NON_HTTPS_URLS.items()],
+    )
+    def test_secret_ref_with_non_https_url_rejected(
+        self,
+        tenant_a_token: str,
+        tenant_a_namespace: Namespace,
+        evalhub_mt_ca_bundle_file: str,
+        evalhub_mt_route: Route,
+        evalhub_vllm_emulator_service: Service,
+        git_basic_auth_secret: Secret,
+        non_https_url: str,
+    ) -> None:
+        """Given a git test_data_ref that pairs a secret_ref with a non-HTTPS URL
+        (http://, git://, or git@ SSH),
+        when the job is submitted,
+        then the API rejects it (a secret_ref is only permitted with an HTTPS URL) and no job is
+        created."""
+        payload = build_evalhub_job_payload(
+            model_service_name=evalhub_vllm_emulator_service.name,
+            tenant_namespace=tenant_a_namespace.name,
+            job_name="git-secret-ref-non-https",
+        )
+        git_ref = build_git_test_data_ref(
+            url=non_https_url,
+            ref="main",
+            secret_ref=git_basic_auth_secret.name,
+        )
+        for benchmark in payload["benchmarks"]:
+            benchmark["test_data_ref"] = git_ref
+
+        response = post_evalhub_job_raw(
+            host=evalhub_mt_route.host,
+            token=tenant_a_token,
+            ca_bundle_file=evalhub_mt_ca_bundle_file,
+            tenant=tenant_a_namespace.name,
+            payload=payload,
+        )
+        assert 400 <= response.status_code < 500, (
+            f"A secret_ref with a non-HTTPS URL {non_https_url!r} must be rejected with a 4xx, "
+            f"got {response.status_code}: {response.text}"
+        )
+
+    def test_non_https_url_without_secret_ref_accepted(
+        self,
+        tenant_a_token: str,
+        tenant_a_namespace: Namespace,
+        evalhub_mt_ca_bundle_file: str,
+        evalhub_mt_route: Route,
+        evalhub_vllm_emulator_service: Service,
+        submit_git_job: Callable[..., str],
+    ) -> None:
+        """Given the same non-HTTPS URL but no secret_ref,
+        when the job is submitted,
+        then the API accepts it (the non-HTTPS scheme alone is not rejected); the job may later fail
+        at clone time, which is out of scope here."""
+        job_id = submit_git_job(
+            url=GIT_NON_HTTPS_URLS["http"],
+            ref="main",
+            job_name="git-non-https-no-secret",
+        )
+        assert job_id, "A non-HTTPS URL without a secret_ref must be accepted (a job id is returned)"

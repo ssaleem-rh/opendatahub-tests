@@ -152,6 +152,16 @@ GIT_SENTINEL_PASSWORD: str = "SENTINEL-GIT-PAT-do-not-log-3f9c12ab"  # pragma: a
 GIT_CONFLICT_S3_BUCKET: str = "evalhub-data"
 GIT_CONFLICT_S3_KEY: str = "unused/conflict-check.json"
 
+# TC-NEG-006: a secret_ref is only permitted with an HTTPS URL. A secret_ref combined with any
+# non-HTTPS scheme (http://, git://, or git@ SSH) must be rejected at validation, before any clone
+# is attempted, so these URLs need not resolve. Without a secret_ref the same non-HTTPS URLs are
+# accepted. Keyed by scheme so tests can parametrize with a readable id.
+GIT_NON_HTTPS_URLS: dict[str, str] = {
+    "http": "http://github.com/trustyai/evalhub-test-data-private.git",
+    "git-protocol": "git://github.com/trustyai/evalhub-test-data-private.git",
+    "ssh": "git@github.com:trustyai/evalhub-test-data-private.git",
+}
+
 # Hardware profile
 EVALHUB_DEFAULT_HARDWARE_PROFILE: str = "default-profile"
 
