@@ -1683,6 +1683,18 @@ def fetch_evalhub_job_logs_while_running(
 # Operator reconciliation observability helpers (RHAISTRAT-1606 / RHAI-241)
 
 
+def get_free_local_port() -> int:
+    """Return an available local TCP port for port-forwarding.
+
+    Binds to port 0 to let the OS allocate a free ephemeral port, then releases it.
+    Suitable for callers (e.g. TimeoutSampler loops) that cannot use the pytest
+    ``unused_tcp_port_factory`` fixture.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))  # noqa: FCN001
+        return sock.getsockname()[1]
+
+
 def fetch_operator_metrics(
     admin_client: DynamicClient,
     operator_metrics_token: str,

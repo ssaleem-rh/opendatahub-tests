@@ -142,14 +142,23 @@ class TestEvalHubServiceMonitor:
         evalhub_service_monitor: ServiceMonitor,
         prometheus: Prometheus,
     ) -> None:
-        """Verify EvalHub metrics are queryable through the Thanos Querier."""
+        """Verify EvalHub metrics are queryable through the Thanos Querier.
+
+        Queries a Prometheus runtime metric that the EvalHub /metrics endpoint always exports
+        (go_goroutines is always > 0). Application HTTP request metrics use OTEL naming and are
+        only exported when the OTEL metrics sink is enabled; that is covered by test_evalhub_otel.py.
+        """
         sm_name = f"{evalhub_cr.name}{EVALHUB_METRICS_SERVICE_SUFFIX}"
+        # When this test runs in isolation (not after test_prometheus_target_up), it must absorb the
+        # full cold-start path for a freshly created target: ServiceMonitor discovery by
+        # prometheus-operator, config reload, first scrape, and propagation to the Thanos query API.
+        # That can exceed 120s, so allow a generous budget to keep the test self-sufficient.
         validate_metrics_field(
             prometheus=prometheus,
-            metrics_query=f'http_requests_total{{job="{sm_name}"}}',
+            metrics_query=f'go_goroutines{{job="{sm_name}"}}',
             expected_value="0",
             greater_than=True,
-            timeout=120,
+            timeout=300,
         )
 
 

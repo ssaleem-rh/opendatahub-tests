@@ -5,6 +5,7 @@ import uuid
 from collections.abc import Callable, Generator
 from typing import Any
 
+import portforward
 import pytest
 import structlog
 from kubernetes.dynamic import DynamicClient
@@ -35,6 +36,7 @@ from tests.ai_safety.evalhub.constants import (
     EVALHUB_JOB_SA_PREFIX,
     EVALHUB_JOB_SA_SUFFIX,
     EVALHUB_JOBS_WRITER_CLUSTERROLE,
+    EVALHUB_METRICS_PORT,
     EVALHUB_METRICS_SERVICE_SUFFIX,
     EVALHUB_MT_CR_NAME,
     EVALHUB_TENANT_LABEL_KEY,
@@ -85,6 +87,7 @@ from tests.ai_safety.evalhub.utils import (
     build_hf_multi_benchmark_job_payload,
     build_pvc_job_payload,
     delete_evalhub_job,
+    get_free_local_port,
     is_evalhub_crd_available,
     submit_evalhub_job,
     submit_garak_job,
@@ -374,6 +377,27 @@ def evalhub_metrics_service(
         namespace=model_namespace.name,
         ensure_exists=True,
     )
+
+
+@pytest.fixture(scope="class")
+def evalhub_metrics_url(
+    evalhub_metrics_service: Service,
+) -> Generator[str, Any, Any]:
+    """Port-forward the EvalHub metrics service and yield a locally reachable base URL.
+
+    The metrics endpoint listens on cluster-internal port 8081 with no Route, so its
+    ``.svc.cluster.local`` address is not resolvable from outside the cluster. Port-forwarding
+    makes the tests portable across laptop, CI executor, and in-cluster runs.
+    """
+    local_port = get_free_local_port()
+    with portforward.forward(
+        pod_or_service=evalhub_metrics_service.name,
+        namespace=evalhub_metrics_service.namespace,
+        from_port=local_port,
+        to_port=EVALHUB_METRICS_PORT,
+        waiting=20,
+    ):
+        yield f"http://127.0.0.1:{local_port}"
 
 
 # MLflow fixture
