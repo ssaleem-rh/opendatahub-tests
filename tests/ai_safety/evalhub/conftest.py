@@ -1321,6 +1321,35 @@ def otel_collector_namespace(admin_client: DynamicClient) -> Generator[Namespace
         yield ns
 
 
+def _dump_otel_collector_diagnostics(
+    admin_client: DynamicClient,
+    namespace: str,
+    label_selector: str,
+) -> None:
+    """Dump pod state and container logs for OTEL collector pods on startup failure.
+
+    Called when ``wait_for_replicas`` times out so the next run reveals the real
+    cause (ImagePullBackOff, config parse error, SCC rejection, crash) instead of
+    an opaque "timed out after 300 seconds" before the namespace is torn down.
+    """
+    pods = list(
+        Pod.get(
+            client=admin_client,
+            namespace=namespace,
+            label_selector=label_selector,
+        )
+    )
+    if not pods:
+        LOGGER.error(f"No OTEL collector pods found in {namespace} with selector {label_selector}")
+        return
+    for pod in pods:
+        collect_pod_information(pod=pod)
+        try:
+            LOGGER.error(pod.log(container="otel-collector"))
+        except Exception:
+            LOGGER.exception(f"Failed to collect OTEL collector logs for pod {pod.name}")
+
+
 @pytest.fixture(scope="class")
 def otel_collector_config(
     admin_client: DynamicClient,
@@ -1344,8 +1373,8 @@ processors:
     limit_mib: 512
 
 exporters:
-  logging:
-    loglevel: debug
+  debug:
+    verbosity: detailed
   prometheus:
     endpoint: "0.0.0.0:{OTEL_COLLECTOR_PROMETHEUS_PORT}"
     namespace: evalhub
@@ -1357,7 +1386,7 @@ service:
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [logging, prometheus]
+      exporters: [debug, prometheus]
 """
     with ConfigMap(
         client=admin_client,
@@ -1425,7 +1454,15 @@ def otel_collector_deployment(
             },
         },
     ) as deployment:
-        deployment.wait_for_replicas(timeout=300)
+        try:
+            deployment.wait_for_replicas(timeout=300)
+        except TimeoutExpiredError:
+            _dump_otel_collector_diagnostics(
+                admin_client=admin_client,
+                namespace=otel_collector_namespace.name,
+                label_selector="app=otel-collector",
+            )
+            raise
         yield deployment
 
 
