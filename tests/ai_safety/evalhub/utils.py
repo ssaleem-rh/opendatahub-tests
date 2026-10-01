@@ -1,6 +1,7 @@
 import socket
 from typing import Any, Final
 
+import portforward
 import pytest
 import requests
 import structlog
@@ -1683,6 +1684,18 @@ def fetch_evalhub_job_logs_while_running(
 # Operator reconciliation observability helpers (RHAISTRAT-1606 / RHAI-241)
 
 
+def get_free_local_port() -> int:
+    """Return an available local TCP port for port-forwarding.
+
+    Binds to port 0 to let the OS allocate a free ephemeral port, then releases it.
+    Suitable for callers (e.g. TimeoutSampler loops) that cannot use the pytest
+    ``unused_tcp_port_factory`` fixture.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))  # noqa: FCN001
+        return sock.getsockname()[1]
+
+
 def fetch_operator_metrics(
     admin_client: DynamicClient,
     operator_metrics_token: str,
@@ -1705,13 +1718,43 @@ def fetch_operator_metrics(
         )
     )
     assert pods, "No operator pod found"
-    pod = pods[0]
-    response = requests.get(
-        f"https://{pod.instance.status.podIP}:{OPERATOR_METRICS_PORT}/metrics",
-        headers={"Authorization": f"Bearer {operator_metrics_token}"},
-        verify=False,
-        timeout=10,
+    # During an operator rollout (e.g. the OTEL-env patch in operator_with_otel_tracing) the label
+    # selector briefly matches two pods: the new one and the old one being terminated. Blindly taking
+    # pods[0] can land on the terminating pod, whose port-forward fails ("deadline has elapsed") and
+    # which no longer serves the current reconcile metrics. Prefer a Running, Ready, non-terminating
+    # pod; fall back to the first pod only if none qualify.
+    pod = next(
+        (
+            p
+            for p in pods
+            if not p.instance.metadata.get("deletionTimestamp")
+            and p.instance.status.phase == Pod.Status.RUNNING
+            and any(
+                cond.type == "Ready" and cond.status == "True" for cond in (p.instance.status.get("conditions") or [])
+            )
+        ),
+        pods[0],
     )
+    # The operator metrics endpoint listens on the pod's cluster-internal IP, which is not
+    # routable from outside the cluster (e.g. a laptop or CI executor). Port-forward a local
+    # port to the pod's metrics port so the test is portable regardless of where it runs.
+    local_port = get_free_local_port()
+    with portforward.forward(
+        pod_or_service=pod.name,
+        namespace=operator_ns,
+        from_port=local_port,
+        to_port=OPERATOR_METRICS_PORT,
+        waiting=20,
+    ):
+        # OPERATOR_METRICS_PORT (8080) is the operator's plain-HTTP metrics endpoint
+        # (trustyai-service-operator-metrics-service), which serves the custom
+        # evalhub_controller_* metrics with no authn. The token-guarded HTTPS endpoint is a
+        # separate service on 8443; using https:// here yields SSL WRONG_VERSION_NUMBER.
+        response = requests.get(
+            f"http://127.0.0.1:{local_port}/metrics",
+            headers={"Authorization": f"Bearer {operator_metrics_token}"},
+            timeout=10,
+        )
     response.raise_for_status()
     return response.text
 

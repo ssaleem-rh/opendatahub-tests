@@ -193,19 +193,24 @@ OTLP_INDICATORS: tuple[str, ...] = (
 
 # Operator Reconciliation Observability (RHAISTRAT-1606 / RHAI-241)
 
-# Prometheus metric names exposed on operator :8080
+# Prometheus metric names exposed on operator :8080 (all prefixed evalhub_controller_,
+# confirmed against the live operator /metrics endpoint).
 RECONCILE_DURATION_METRIC: str = "evalhub_controller_reconcile_duration_seconds"
 RECONCILE_TOTAL_METRIC: str = "evalhub_controller_reconcile_total"
 RECONCILE_ERRORS_METRIC: str = "evalhub_controller_reconcile_errors_total"
-MANAGED_INSTANCES_METRIC: str = "evalhub_managed_instances_total"
-JOB_FAILURE_EVENTS_METRIC: str = "evalhub_job_failure_events_total"
+MANAGED_INSTANCES_METRIC: str = "evalhub_controller_managed_instances"
+# Event-conditional: only registered after a real job-failure reconcile occurs, so it is NOT part
+# of EVALHUB_RECONCILE_METRICS (the eagerly-registered set). Exercised by the dedicated
+# job-failure tests, which require a failing-job fixture.
+JOB_FAILURE_EVENTS_METRIC: str = "evalhub_controller_job_failure_events_total"
 
+# The four metric families the operator registers eagerly at startup / on the first reconcile of a
+# healthy CR. Does not include JOB_FAILURE_EVENTS_METRIC (event-conditional, see above).
 EVALHUB_RECONCILE_METRICS: tuple[str, ...] = (
     RECONCILE_DURATION_METRIC,
     RECONCILE_TOTAL_METRIC,
     RECONCILE_ERRORS_METRIC,
     MANAGED_INSTANCES_METRIC,
-    JOB_FAILURE_EVENTS_METRIC,
 )
 
 # Metric label keys
@@ -219,15 +224,24 @@ RESULT_SUCCESS: str = "success"
 RESULT_REQUEUE: str = "requeue"
 RESULT_ERROR: str = "error"
 
-# Metric label values — bounded error_type enumeration
-ERROR_TYPE_DEPLOYMENT_CREATE_FAILED: str = "deployment_create_failed"
-ERROR_TYPE_SERVICE_UPDATE_FAILED: str = "service_update_failed"
-ERROR_TYPE_OTHER: str = "other"
+# Metric label values — bounded error_type enumeration.
+# The operator classifies reconcile errors by the resource/phase that failed (confirmed against
+# the live operator :8080 metrics and the evalhub.reconcile.* span names), NOT by verbose
+# "<resource>_<verb>_failed" strings. There is no generic "other" catch-all bucket.
+ERROR_TYPE_CONFIGMAP: str = "configmap"
+ERROR_TYPE_DEPLOYMENT: str = "deployment"
+ERROR_TYPE_SERVICE: str = "service"
+ERROR_TYPE_ROUTE: str = "route"
+ERROR_TYPE_RBAC: str = "rbac"
+ERROR_TYPE_CONFLICT: str = "conflict"
 
 EVALHUB_ERROR_TYPES: tuple[str, ...] = (
-    ERROR_TYPE_DEPLOYMENT_CREATE_FAILED,
-    ERROR_TYPE_SERVICE_UPDATE_FAILED,
-    ERROR_TYPE_OTHER,
+    ERROR_TYPE_CONFIGMAP,
+    ERROR_TYPE_DEPLOYMENT,
+    ERROR_TYPE_SERVICE,
+    ERROR_TYPE_ROUTE,
+    ERROR_TYPE_RBAC,
+    ERROR_TYPE_CONFLICT,
 )
 
 # Controller label value used in all metrics

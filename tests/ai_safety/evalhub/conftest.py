@@ -1321,6 +1321,35 @@ def otel_collector_namespace(admin_client: DynamicClient) -> Generator[Namespace
         yield ns
 
 
+def _dump_otel_collector_diagnostics(
+    admin_client: DynamicClient,
+    namespace: str,
+    label_selector: str,
+) -> None:
+    """Dump pod state and container logs for OTEL collector pods on startup failure.
+
+    Called when ``wait_for_replicas`` times out so the next run reveals the real
+    cause (ImagePullBackOff, config parse error, SCC rejection, crash) instead of
+    an opaque "timed out after 300 seconds" before the namespace is torn down.
+    """
+    pods = list(
+        Pod.get(
+            client=admin_client,
+            namespace=namespace,
+            label_selector=label_selector,
+        )
+    )
+    if not pods:
+        LOGGER.error(f"No OTEL collector pods found in {namespace} with selector {label_selector}")
+        return
+    for pod in pods:
+        collect_pod_information(pod=pod)
+        try:
+            LOGGER.error(pod.log(container="otel-collector"))
+        except Exception:
+            LOGGER.exception(f"Failed to collect OTEL collector logs for pod {pod.name}")
+
+
 @pytest.fixture(scope="class")
 def otel_collector_config(
     admin_client: DynamicClient,
@@ -2139,7 +2168,15 @@ def otel_trace_collector_deployment(
             },
         },
     ) as deployment:
-        deployment.wait_for_replicas(timeout=300)
+        try:
+            deployment.wait_for_replicas(timeout=300)
+        except TimeoutExpiredError:
+            _dump_otel_collector_diagnostics(
+                admin_client=admin_client,
+                namespace=otel_trace_collector_namespace.name,
+                label_selector=f"app={OTEL_TRACE_COLLECTOR_LABELS['app']}",
+            )
+            raise
         yield deployment
 
 
@@ -2205,16 +2242,25 @@ def operator_with_otel_tracing(
         f".{otel_trace_collector_service.namespace}"
         f".svc.cluster.local:{OTEL_COLLECTOR_GRPC_PORT}"
     )
-    num_replicas: int = trustyai_operator_deployment.instance.spec.replicas
 
-    env_patch = [
-        {"name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": endpoint},
-        {"name": "OTEL_SERVICE_NAME", "value": OPERATOR_OTEL_SERVICE_NAME},
-        {"name": "OTEL_TRACES_EXPORTER", "value": "otlp"},
-    ]
+    otel_env = {
+        "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
+        "OTEL_SERVICE_NAME": OPERATOR_OTEL_SERVICE_NAME,
+        "OTEL_TRACES_EXPORTER": "otlp",
+    }
 
-    containers = trustyai_operator_deployment.instance.spec.template.spec.containers
-    manager_idx = next((idx for idx, c in enumerate(containers) if c.name == "manager"), 0)
+    # ResourceEditor patches with application/merge-patch+json, which replaces the whole containers
+    # array wholesale. Sending a partial container ({name, env}) therefore drops the required image
+    # field (and every other container field), which the API rejects with 422. Send the full,
+    # current manager container with the OTEL vars merged into its existing env instead.
+    deployment_spec = trustyai_operator_deployment.instance.to_dict()["spec"]["template"]["spec"]
+    containers = deployment_spec["containers"]
+    manager_idx = next((idx for idx, c in enumerate(containers) if c["name"] == "manager"), 0)
+
+    merged_containers = [dict(c) for c in containers]
+    manager = merged_containers[manager_idx]
+    existing_env = [dict(e) for e in (manager.get("env") or []) if e.get("name") not in otel_env]
+    manager["env"] = existing_env + [{"name": name, "value": value} for name, value in otel_env.items()]
 
     with ResourceEditor(
         patches={
@@ -2222,25 +2268,24 @@ def operator_with_otel_tracing(
                 "spec": {
                     "template": {
                         "spec": {
-                            "containers": [
-                                {
-                                    "name": containers[manager_idx].name,
-                                    "env": env_patch,
-                                }
-                            ]
+                            "containers": merged_containers,
                         }
                     }
                 }
             }
         }
     ):
-        trustyai_operator_deployment.scale_replicas(replica_count=0)
-        trustyai_operator_deployment.scale_replicas(replica_count=num_replicas)
+        # Patching spec.template.spec.containers (the OTEL env) changes the pod template, which
+        # triggers a rolling update on its own — the new operator pod comes up with the OTEL env.
+        # Do NOT scale the deployment to force a restart: this Deployment is platform-managed (owned
+        # by the TrustyAI/default-trustyai CR and reconciled by the rhods-operator, which owns
+        # spec.replicas via server-side-apply). A manual scale 0->up races with that reconcile and
+        # can leave the operator stuck at 0 replicas. Just wait for the template-change rollout.
         trustyai_operator_deployment.wait_for_replicas(timeout=300)
         yield trustyai_operator_deployment
 
-    trustyai_operator_deployment.scale_replicas(replica_count=0)
-    trustyai_operator_deployment.scale_replicas(replica_count=num_replicas)
+    # ResourceEditor restores the original container spec on exit, which triggers another rollout
+    # back to the non-OTEL env. Wait for that rollout to settle without touching replicas.
     trustyai_operator_deployment.wait_for_replicas(timeout=300)
 
 

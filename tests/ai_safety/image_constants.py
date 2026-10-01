@@ -38,9 +38,12 @@ class AiSafetyImages:
         "oci://quay.io/trustyai_testing/loan-model-alpha-modelcar"
         "@sha256:837ca7b3064a08c5fa1a33c3cc557e96c7c2a70d0a8353076a2f8e95abcb6e60"
     )
+    # Contrib distribution (otelcol-contrib): the collector config uses the `prometheus`
+    # exporter, which ships only in contrib, not the core collector. Pinned by digest
+    # (resolves to v0.161.0); the previous core-distribution digest was invalid (manifest unknown).
     OTEL_COLLECTOR: str = (
-        "ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector"
-        "@sha256:62c84db5d6fa6e7c3dfc8e63d60b8d4e9e4f8dfded5b6c4056e44c6d3e78ac63"
+        "ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib"
+        "@sha256:b5cf983651c32c3ca13f936deb51742015a54d121f388cac248923ddeb8cc9fc"
     )
     EVALHUB_INVALID_IMAGE: str = (  # noqa: IMG002
         "quay.io/trustyai_testing/nonexistent-image"
