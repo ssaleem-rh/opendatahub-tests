@@ -8,14 +8,20 @@ against the eval-hub ``job_builders`` conventions.
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
+from typing import Any
 
 import pytest
 from kubernetes.dynamic import DynamicClient
 from ocp_resources.config_map import ConfigMap
+from ocp_resources.evalhub import EvalHub
 from ocp_resources.job import Job
+from ocp_resources.mlflow import MLflow
 from ocp_resources.namespace import Namespace
+from ocp_resources.network_policy import NetworkPolicy
 from ocp_resources.route import Route
 from ocp_resources.service import Service
+from pytest_testconfig import config as py_config
 from timeout_sampler import TimeoutExpiredError, TimeoutSampler
 
 from tests.ai_safety.evalhub.constants import (
@@ -37,6 +43,11 @@ from tests.ai_safety.evalhub.utils import (
     wait_for_evalhub_runtime_job_count,
     wait_for_evalhub_runtime_resources_absent,
 )
+
+MLFLOW_SERVICE_PORT = 8443
+_MLFLOW_POD_SELECTOR = {"app": "mlflow", "component": "mlflow"}
+# Labels on the EvalHub API pod (as opposed to evaluation Job pods, which carry different labels).
+_EVALHUB_API_POD_SELECTOR = {"app": "eval-hub", "component": "api"}
 
 
 def _adapter_container(job: Job):
@@ -467,6 +478,65 @@ class TestEvalHubK8sJobDeleteBehaviour:
 @pytest.mark.ai_safety
 class TestEvalHubK8sMlflowJobSpec:
     """experiment_name / tags in job.json when the cluster EvalHub enables MLflow."""
+
+    @pytest.fixture(scope="class")
+    def mlflow_network_policy(
+        self,
+        admin_client: DynamicClient,
+        model_namespace: Namespace,
+    ) -> Generator[NetworkPolicy, Any, Any]:
+        """Allow this class's EvalHub API pod to reach MLflow in the applications namespace.
+
+        Same gap/fix as evalcard_mlflow_network_policy in
+        tests.ai_safety.evalhub.evalcard.conftest: the applications namespace's default
+        NetworkPolicy only admits ingress from namespaces labeled
+        opendatahub.io/generated-namespace=true or opendatahub.io/application-namespace=true,
+        which test namespaces carry neither of.
+        """
+        with NetworkPolicy(
+            client=admin_client,
+            name=f"allow-k8s-resources-mt-mlflow-from-{model_namespace.name}",
+            namespace=py_config["applications_namespace"],
+            pod_selector={"matchLabels": _MLFLOW_POD_SELECTOR},
+            policy_types=["Ingress"],
+            ingress=[
+                {
+                    "from": [
+                        {
+                            "namespaceSelector": {
+                                "matchLabels": {"kubernetes.io/metadata.name": model_namespace.name},
+                            },
+                            "podSelector": {"matchLabels": _EVALHUB_API_POD_SELECTOR},
+                        }
+                    ],
+                    "ports": [{"protocol": "TCP", "port": MLFLOW_SERVICE_PORT}],
+                }
+            ],
+        ) as network_policy:
+            yield network_policy
+
+    @pytest.fixture(scope="class")
+    def evalhub_mt_cr(  # noqa: UFN001
+        self,
+        admin_client: DynamicClient,
+        model_namespace: Namespace,
+        mlflow_network_policy: NetworkPolicy,
+        mlflow_instance: MLflow,
+    ) -> Generator[EvalHub, Any, Any]:
+        """Override the shared evalhub_mt_cr fixture to add MLflow tracking for this class only."""
+        mlflow_uri = (
+            f"https://mlflow.{py_config['applications_namespace']}.svc.cluster.local:{MLFLOW_SERVICE_PORT}/mlflow"
+        )
+        with EvalHub(
+            client=admin_client,
+            name="evalhub-mt",
+            namespace=model_namespace.name,
+            database={"type": "sqlite"},
+            collections=["leaderboard-v2"],
+            env=[{"name": "MLFLOW_TRACKING_URI", "value": mlflow_uri}],
+            wait_for_resource=True,
+        ) as evalhub:
+            yield evalhub
 
     def test_mlflow_experiment_fields_in_job_json_when_supported(
         self,
