@@ -11,6 +11,7 @@ from ocp_resources.deployment import Deployment
 from ocp_resources.evalhub import EvalHub
 from ocp_resources.mlflow import MLflow
 from ocp_resources.namespace import Namespace
+from ocp_resources.resource import ResourceEditor
 from ocp_resources.route import Route
 from ocp_resources.secret import Secret
 from ocp_resources.service import Service
@@ -68,9 +69,30 @@ def evalcard_mlflow_instance(
 
 
 @pytest.fixture(scope="class")
+def model_namespace_mlflow_network_access(
+    model_namespace: Namespace,
+) -> None:
+    """Label model_namespace so EvalHub can reach MLflow in the applications namespace.
+
+    The cluster's default NetworkPolicy on the applications namespace (where MLflow
+    runs) only allows ingress from namespaces labeled
+    opendatahub.io/generated-namespace=true or opendatahub.io/application-namespace=true.
+    Test-created namespaces carry neither label by default.
+    """
+    ResourceEditor({
+        model_namespace: {
+            "metadata": {
+                "labels": {"opendatahub.io/generated-namespace": "true"},
+            }
+        }
+    }).update()
+
+
+@pytest.fixture(scope="class")
 def evalhub_mt_cr(  # noqa: UFN001
     admin_client: DynamicClient,
     model_namespace: Namespace,
+    model_namespace_mlflow_network_access: None,
     evalcard_mlflow_instance: MLflow,
 ) -> Generator[EvalHub, Any, Any]:
     """Override the shared evalhub_mt_cr fixture to add MLflow tracking."""
@@ -286,7 +308,10 @@ def evalcard_oci_credentials_secret(
     dockerconfig = {
         "auths": {
             oci_registry_host: {
-                "auth": "",
+                # The local zot test registry runs with no auth enforcement, but
+                # eval-hub's OCI token producer still requires a non-empty, well-formed
+                # user:pass auth entry to resolve registry credentials.
+                "auth": b64encode(b"testuser:testpass").decode(),
                 "email": "user@example.com",
             }
         }
@@ -294,7 +319,6 @@ def evalcard_oci_credentials_secret(
 
     data_dict = {
         ".dockerconfigjson": b64encode(json.dumps(dockerconfig).encode()).decode(),
-        "OCI_HOST": b64encode(oci_registry_host.encode()).decode(),
     }
 
     with Secret(
@@ -316,6 +340,7 @@ def evalcard_oci_job(
     evalhub_vllm_emulator_service: Service,
     evalcard_oci_credentials_secret: Secret,
     oci_registry_pod_with_minio,
+    oci_registry_host: str,
 ) -> tuple[str, dict]:
     """Submit a job configured to export evalcard to an OCI registry."""
     payload = build_evalhub_job_payload(
@@ -324,19 +349,16 @@ def evalcard_oci_job(
         job_name="evalcard-oci-export",
     )
     payload["experiment"] = {"name": "evalcard-oci-experiment"}
-    payload["evalcard_export"] = {
+    payload["exports"] = {
         "oci": {
-            "registry": {
-                "name": evalcard_oci_credentials_secret.name,
-                "key": "OCI_HOST",
+            "coordinates": {
+                "oci_host": f"http://{oci_registry_host}",
+                "oci_repository": EVALCARD_OCI_REPO,
+                "oci_tag": EVALCARD_OCI_TAG,
             },
-            "repository": EVALCARD_OCI_REPO,
-            "tag": EVALCARD_OCI_TAG,
-            "dockerConfigJson": {
-                "name": evalcard_oci_credentials_secret.name,
-                "key": ".dockerconfigjson",
+            "k8s": {
+                "connection": evalcard_oci_credentials_secret.name,
             },
-            "verifySSL": False,
         },
     }
 

@@ -1,12 +1,11 @@
-# EvalCard API endpoint (update when finalized)
-EVALHUB_EVALCARD_PATH_TEMPLATE: str = "/api/v1/evaluations/jobs/{job_id}/evalcard"
+# EvalCard has no HTTP discovery endpoint; it is persisted as an MLflow run artifact
+# (internal/eval_hub/mlflow/artifacts.go) and/or an OCI artifact (internal/eval_hub/evalcards).
+EVALCARD_MLFLOW_RUN_TAG_KEY: str = "evaluation_job_id"
+EVALCARD_MLFLOW_ARTIFACT_NAME: str = "evaluation-card.json"
 
 # EvalCard version constants
 EVALCARD_SCHEMA_VERSION: str = "1.0"
 EVALCARD_CARD_VERSION: str = "1.0"
-
-# MLflow artifact name
-EVALCARD_MLFLOW_ARTIFACT_NAME: str = "evalcard.yaml"
 
 # OCI export constants
 EVALCARD_OCI_REPO: str = "evalhub/evalcard"
@@ -18,8 +17,6 @@ EVALCARD_REQUIRED_TOP_LEVEL_KEYS: set[str] = {
     "schema_version",
     "metadata",
     "context",
-    "results",
-    "references",
 }
 
 EVALCARD_METADATA_REQUIRED_KEYS: set[str] = {
@@ -28,13 +25,10 @@ EVALCARD_METADATA_REQUIRED_KEYS: set[str] = {
     "updated_at",
 }
 
+# "benchmarks" and "collection_id" are mutually exclusive on context (collection jobs
+# only set collection_id), so they are validated conditionally, not listed here.
 EVALCARD_CONTEXT_REQUIRED_KEYS: set[str] = {
     "model",
-    "benchmarks",
-}
-
-EVALCARD_RESULTS_REQUIRED_KEYS: set[str] = {
-    "benchmarks",
 }
 
 EVALCARD_BENCHMARK_RESULT_REQUIRED_KEYS: set[str] = {

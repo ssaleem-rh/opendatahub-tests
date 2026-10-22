@@ -127,6 +127,44 @@ class EvalHubV1Alpha1(EvalHub):
 
 TENANT_HEADER: str = "X-Tenant"
 
+EVALHUB_POD_LABEL_SELECTOR: Final[str] = "app=eval-hub,component=api"
+
+
+def get_evalhub_pod(admin_client: DynamicClient, namespace: str) -> Pod:
+    """Fetch the running EvalHub API pod in a namespace."""
+    pods = list(
+        Pod.get(
+            client=admin_client,
+            namespace=namespace,
+            label_selector=EVALHUB_POD_LABEL_SELECTOR,
+        )
+    )
+    assert pods, f"No EvalHub pod found in namespace {namespace}"
+    return pods[0]
+
+
+def curl_from_evalhub_pod(
+    admin_client: DynamicClient,
+    namespace: str,
+    url: str,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    data: str | None = None,
+) -> str:
+    """Run curl from inside the EvalHub pod.
+
+    Some endpoints (e.g. the metrics port, or the MLflow service) are only reachable via
+    cluster-internal DNS, which the test runner cannot resolve from outside the cluster.
+    """
+    pod = get_evalhub_pod(admin_client=admin_client, namespace=namespace)
+    command = ["curl", "-s", "-k", "--max-time", "15", "-X", method]
+    for key, value in (headers or {}).items():
+        command += ["-H", f"{key}: {value}"]
+    if data is not None:
+        command += ["-d", data]
+    command.append(url)
+    return pod.execute(command=command, container="evalhub")
+
 
 def build_headers(token: str, tenant: str | None = None) -> dict[str, str]:
     """Build request headers with auth and optional tenant.
