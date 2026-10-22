@@ -324,6 +324,12 @@ EVALHUB_NP_INSTANCE_NAMESPACE_LABEL: str = "evalhub_instance_namespace"
 # applications-namespace overlays keep.
 EVALHUB_NP_OPERATOR_POD_LABELS: dict[str, str] = {"control-plane": "trustyai-service-operator"}
 
+# controller-runtime leader election Lease name (kubebuilder-generated
+# LeaderElectionID, stable for this operator's codebase/version). Used to
+# resolve the actively-reconciling pod when multiple pods transiently exist
+# during a rolling update.
+OPERATOR_LEADER_ELECTION_LEASE: str = "b7e9931f.trustyai.opendatahub.io"
+
 # Operator service name in OTEL traces
 OPERATOR_OTEL_SERVICE_NAME: str = "trustyai-service-operator"
 
