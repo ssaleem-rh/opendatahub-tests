@@ -389,9 +389,9 @@ class TestEvalHubJobLogsNegativeMT:
         tenant_a_namespace: Namespace,
         evalhub_mt_ca_bundle_file: str,
         evalhub_mt_route: Route,
-        evalhub_logs_completed_job_id: str,
+        evalhub_logs_existing_job_id: str,
     ) -> None:
-        """Given a completed job, When log request parameters are invalid, Then the API returns an error."""
+        """Given an existing job, When log request parameters are invalid, Then the API returns an error."""
         params: dict[str, str] | None = None
         benchmark_index: int | None = None
         expected_status = 400
@@ -411,7 +411,7 @@ class TestEvalHubJobLogsNegativeMT:
             token=tenant_a_token,
             ca_bundle_file=evalhub_mt_ca_bundle_file,
             tenant=tenant_a_namespace.name,
-            job_id=evalhub_logs_completed_job_id,
+            job_id=evalhub_logs_existing_job_id,
             params=params,
             benchmark_index=benchmark_index,
         )

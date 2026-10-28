@@ -12,6 +12,7 @@ from tests.ai_safety.evalhub.constants import EVALHUB_HEALTH_PATH, EVALHUB_LOG_M
 from tests.ai_safety.evalhub.utils import (
     assert_plain_text_logs_response,
     build_evalhub_job_payload,
+    get_evalhub_job_http,
     get_evalhub_job_logs_http,
     submit_evalhub_job,
     wait_for_evalhub_job,
@@ -90,7 +91,52 @@ def evalhub_logs_completed_job_id(
         job_id=job_id,
         timeout=600,
     )
-    assert job_result.get("status", {}).get("state") == "completed"
+    job_status = job_result.get("status", {})
+    # Surface the server-side reason (status.message / per-benchmark status) instead of a bare state mismatch.
+    assert job_status.get("state") == "completed", (
+        f"EvalHub job '{job_id}' ended in state '{job_status.get('state')}' instead of 'completed'. "
+        f"Job status: {job_status}. Check the job pod events and logs in namespace '{tenant_a_namespace.name}'."
+    )
+    return job_id
+
+
+@pytest.fixture(scope="class")
+def evalhub_logs_existing_job_id(
+    tenant_a_token: str,
+    tenant_a_namespace: Namespace,
+    evalhub_mt_ca_bundle_file: str,
+    evalhub_mt_route: Route,
+    evalhub_vllm_emulator_service: Service,
+) -> str:
+    """Submit one arc_easy job and return its id once the API can read it (any job state).
+
+    The log endpoint validates query parameters and the benchmark index against the stored job
+    before it reads any pod logs, so negative log tests do not depend on the evaluation finishing.
+    """
+    payload = build_evalhub_job_payload(
+        model_service_name=evalhub_vllm_emulator_service.name,
+        tenant_namespace=tenant_a_namespace.name,
+        job_name="evalhub-logs-existing-job",
+    )
+    data = submit_evalhub_job(
+        host=evalhub_mt_route.host,
+        token=tenant_a_token,
+        ca_bundle_file=evalhub_mt_ca_bundle_file,
+        tenant=tenant_a_namespace.name,
+        payload=payload,
+    )
+    job_id = data["resource"]["id"]
+    response = get_evalhub_job_http(
+        host=evalhub_mt_route.host,
+        token=tenant_a_token,
+        ca_bundle_file=evalhub_mt_ca_bundle_file,
+        tenant=tenant_a_namespace.name,
+        job_id=job_id,
+    )
+    assert response.status_code == 200, (
+        f"Submitted job '{job_id}' is not readable via the API: {response.status_code} {response.text}"
+    )
+    LOGGER.info(f"EvalHub job {job_id} exists with state '{response.json().get('status', {}).get('state')}'")
     return job_id
 
 
