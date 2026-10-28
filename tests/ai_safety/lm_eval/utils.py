@@ -1,4 +1,3 @@
-import contextlib
 import re
 from pathlib import Path
 
@@ -115,22 +114,41 @@ def validate_lmeval_job_pod_and_logs(lmevaljob_pod: Pod, timeout: int = tts("1h"
         r"INFO\sdriver\supdate status: job completed\s\{\"state\":\s\{\"state\""
         r":\"Complete\",\"reason\":\"Succeeded\",\"message\":\"job completed\""
     )
-    lmevaljob_pod.wait_for_status(status=lmevaljob_pod.Status.RUNNING, timeout=tts("10m"))
+    terminal_container_reasons = [
+        "ImagePullBackOff",
+        "ErrImagePull",
+        "InvalidImageName",
+        "CreateContainerConfigError",
+        Pod.Status.CRASH_LOOPBACK_OFF,
+    ]
+    last_phase = "unknown"
     try:
-        lmevaljob_pod.wait_for_status(status=Pod.Status.SUCCEEDED, timeout=timeout)
-    except TimeoutExpiredError as e:
-        last_phase = "unknown"
-        with contextlib.suppress(Exception):
-            last_phase = lmevaljob_pod.instance.status.phase
-        collect_pod_information(pod=lmevaljob_pod)
-        if last_phase == Pod.Status.FAILED:
-            message = f"LMEval job pod {lmevaljob_pod.name} failed (last phase: {last_phase})"
-        else:
-            message = (
-                f"LMEval job pod {lmevaljob_pod.name} did not reach Succeeded "
-                f"within {timeout}s (last phase: {last_phase})"
+        for pod_status in TimeoutSampler(
+            wait_timeout=timeout,
+            sleep=10,
+            func=lambda: lmevaljob_pod.instance.status,
+        ):
+            last_phase = pod_status.phase
+            if last_phase == Pod.Status.SUCCEEDED:
+                break
+            if last_phase == Pod.Status.FAILED:
+                collect_pod_information(pod=lmevaljob_pod)
+                raise UnexpectedFailureError(f"LMEval job pod {lmevaljob_pod.name} failed (phase: Failed)")
+            all_container_statuses = list(pod_status.initContainerStatuses or []) + list(
+                pod_status.containerStatuses or []
             )
-        raise UnexpectedFailureError(message) from e
+            for container_status in all_container_statuses:
+                waiting = container_status.state.waiting
+                if waiting and waiting.reason in terminal_container_reasons:
+                    collect_pod_information(pod=lmevaljob_pod)
+                    raise UnexpectedFailureError(
+                        f"LMEval job pod {lmevaljob_pod.name} is stuck in {waiting.reason}: {waiting.message}"
+                    )
+    except TimeoutExpiredError as e:
+        collect_pod_information(pod=lmevaljob_pod)
+        raise UnexpectedFailureError(
+            f"LMEval job pod {lmevaljob_pod.name} did not reach Succeeded within {timeout}s (last phase: {last_phase})"
+        ) from e
     if not bool(re.search(pod_success_log_regex, lmevaljob_pod.log())):
         raise PodLogMissMatchError("LMEval job pod failed.")
 

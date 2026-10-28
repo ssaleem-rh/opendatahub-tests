@@ -378,7 +378,10 @@ def test_lmeval_rerun_after_spec_change(
 
     Validates trustyai-service-operator#729 re-run behavior.
     """
-    validate_lmeval_job_pod_and_logs(lmevaljob_pod=lmevaljob_vllm_emulator_pod)
+    validate_lmeval_job_pod_and_logs(
+        lmevaljob_pod=lmevaljob_vllm_emulator_pod,
+        timeout=LMEVAL_SHORT_JOB_TIMEOUT,
+    )
 
     wait_for_lmevaljob_state(
         lmevaljob=lmevaljob_vllm_emulator,
