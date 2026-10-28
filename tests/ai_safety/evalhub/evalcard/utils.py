@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import requests
+import structlog
 
+from tests.ai_safety.evalhub.constants import EVALHUB_JOBS_PATH
 from tests.ai_safety.evalhub.evalcard.constants import (
     EVALCARD_BENCHMARK_RESULT_REQUIRED_KEYS,
     EVALCARD_CARD_VERSION,
     EVALCARD_CONTEXT_REQUIRED_KEYS,
     EVALCARD_METADATA_REQUIRED_KEYS,
+    EVALCARD_MLFLOW_ARTIFACT_NAME,
+    EVALCARD_OCI_MANIFEST_TAG_TEMPLATE,
     EVALCARD_REQUIRED_TOP_LEVEL_KEYS,
     EVALCARD_RESULTS_REQUIRED_KEYS,
     EVALCARD_SCHEMA_VERSION,
     EVALHUB_EVALCARD_PATH_TEMPLATE,
 )
 from tests.ai_safety.evalhub.utils import build_headers
+from utilities.registry_utils import pull_manifest_from_oci_registry
+
+LOGGER = structlog.get_logger(name=__name__)
 
 
 def get_evalcard_http(
@@ -22,15 +29,60 @@ def get_evalcard_http(
     tenant: str,
     job_id: str,
 ) -> requests.Response:
-    """GET the eval card for a job via the discovery API."""
+    """GET the eval card for a job via the discovery API.
+
+    Logs the requested URL and the response. A plain-text "404 page not found" means the EvalHub server
+    has no such route registered (eval-hub exposes no evalcard endpoint; cards are written to MLflow as
+    the ``evaluation-card.json`` artifact and, optionally, to an OCI registry), so the job is fetched to
+    tell a missing route apart from a missing job.
+    """
     path = EVALHUB_EVALCARD_PATH_TEMPLATE.format(job_id=job_id)
     url = f"https://{host}{path}"
-    return requests.get(
-        url=url,
-        headers=build_headers(token=token, tenant=tenant),
-        verify=ca_bundle_file,
-        timeout=30,
+    headers = build_headers(token=token, tenant=tenant)
+    LOGGER.info(f"Requesting evalcard: GET {url} (tenant={tenant})")
+    response = requests.get(url=url, headers=headers, verify=ca_bundle_file, timeout=30)
+    LOGGER.info(
+        f"Evalcard response: status={response.status_code} content-type={response.headers.get('Content-Type')} "
+        f"body={response.text[:500]!r}"
     )
+    if response.status_code == requests.codes.not_found and response.text.strip() == "404 page not found":
+        job_response = requests.get(
+            url=f"https://{host}{EVALHUB_JOBS_PATH}/{job_id}",
+            headers=headers,
+            verify=ca_bundle_file,
+            timeout=30,
+        )
+        LOGGER.error(
+            f"EvalHub server has no route for {path} (Go mux default 404), while GET job {job_id} returned "
+            f"{job_response.status_code}. Cards are stored as the MLflow artifact "
+            f"{EVALCARD_MLFLOW_ARTIFACT_NAME!r} or exported to OCI, not served by this API."
+        )
+    return response
+
+
+def pull_evalcard_from_oci_registry(registry_url: str, repo: str, oci_tag: str, job_id: str) -> dict:
+    """Pull the eval card JSON that EvalHub exported to an OCI registry.
+
+    EvalHub pushes the manifest under the tag ``<oci_tag>-<job_id>`` with the card as its first layer.
+
+    Args:
+        registry_url: Base URL of the registry, e.g. ``http://host``.
+        repo: Repository the card was exported to.
+        oci_tag: The ``oci_tag`` requested in the job's export configuration.
+        job_id: Evaluation job id, appended to the tag by EvalHub.
+
+    Returns:
+        The eval card as a dict.
+    """
+    manifest_tag = EVALCARD_OCI_MANIFEST_TAG_TEMPLATE.format(oci_tag=oci_tag, job_id=job_id)
+    manifest = pull_manifest_from_oci_registry(registry_url=registry_url, repo=repo, tag=manifest_tag)
+    assert manifest.get("layers"), f"OCI manifest {repo}:{manifest_tag} must contain at least one layer: {manifest}"
+    layer_digest = manifest["layers"][0]["digest"]
+    blob_response = requests.get(url=f"{registry_url}/v2/{repo}/blobs/{layer_digest}", timeout=10)
+    assert blob_response.status_code == requests.codes.ok, (
+        f"Failed to pull eval card blob {layer_digest} from {repo}: {blob_response.status_code}"
+    )
+    return blob_response.json()
 
 
 def validate_evalcard_schema(card: dict, job_id: str) -> None:

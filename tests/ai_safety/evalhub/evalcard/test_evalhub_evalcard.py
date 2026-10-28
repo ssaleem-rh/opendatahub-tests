@@ -7,6 +7,7 @@ from ocp_resources.route import Route
 from tests.ai_safety.evalhub.evalcard.constants import EVALCARD_OCI_REPO, EVALCARD_OCI_TAG
 from tests.ai_safety.evalhub.evalcard.utils import (
     get_evalcard_http,
+    pull_evalcard_from_oci_registry,
     validate_evalcard_collection_fields,
     validate_evalcard_complete_mode,
     validate_evalcard_schema,
@@ -18,7 +19,6 @@ from tests.ai_safety.evalhub.utils import (
     wait_for_evalhub_job,
 )
 from utilities.constants import OCIRegistry
-from utilities.registry_utils import pull_manifest_from_oci_registry
 
 
 @pytest.mark.parametrize(
@@ -220,32 +220,16 @@ class TestEvalHubEvalCard:
     def test_evalcard_oci_export(
         self,
         evalcard_oci_job: tuple[str, dict],
-        tenant_a_token: str,
-        tenant_a_namespace: Namespace,
-        evalhub_mt_ca_bundle_file: str,
-        evalhub_mt_route: Route,
         oci_registry_host: str,
     ) -> None:
         """Eval card is exported to an OCI registry and retrievable as an OCI artifact."""
         job_id, _ = evalcard_oci_job
 
         registry_url = f"http://{oci_registry_host}"
-        manifest = pull_manifest_from_oci_registry(
+        card = pull_evalcard_from_oci_registry(
             registry_url=registry_url,
             repo=EVALCARD_OCI_REPO,
-            tag=EVALCARD_OCI_TAG,
-        )
-        assert manifest, "OCI manifest must not be empty"
-        assert "layers" in manifest, "OCI manifest must contain layers"
-        assert len(manifest["layers"]) >= 1, "OCI manifest must have at least one layer"
-
-        resp = get_evalcard_http(
-            host=evalhub_mt_route.host,
-            token=tenant_a_token,
-            ca_bundle_file=evalhub_mt_ca_bundle_file,
-            tenant=tenant_a_namespace.name,
+            oci_tag=EVALCARD_OCI_TAG,
             job_id=job_id,
         )
-        assert resp.status_code == 200, f"Expected 200 for OCI-exported evalcard, got {resp.status_code}: {resp.text}"
-        card = resp.json()
         validate_evalcard_schema(card=card, job_id=job_id)

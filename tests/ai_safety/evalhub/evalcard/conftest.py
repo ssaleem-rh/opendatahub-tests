@@ -316,6 +316,7 @@ def evalcard_oci_job(
     evalhub_vllm_emulator_service: Service,
     evalcard_oci_credentials_secret: Secret,
     oci_registry_pod_with_minio,
+    oci_registry_host: str,
 ) -> tuple[str, dict]:
     """Submit a job configured to export evalcard to an OCI registry."""
     payload = build_evalhub_job_payload(
@@ -324,21 +325,17 @@ def evalcard_oci_job(
         job_name="evalcard-oci-export",
     )
     payload["experiment"] = {"name": "evalcard-oci-experiment"}
-    payload["evalcard_export"] = {
+    payload["exports"] = {
         "oci": {
-            "registry": {
-                "name": evalcard_oci_credentials_secret.name,
-                "key": "OCI_HOST",
+            "coordinates": {
+                "oci_host": f"http://{oci_registry_host}",
+                "oci_repository": EVALCARD_OCI_REPO,
+                "oci_tag": EVALCARD_OCI_TAG,
             },
-            "repository": EVALCARD_OCI_REPO,
-            "tag": EVALCARD_OCI_TAG,
-            "dockerConfigJson": {
-                "name": evalcard_oci_credentials_secret.name,
-                "key": ".dockerconfigjson",
-            },
-            "verifySSL": False,
+            "k8s": {"connection": evalcard_oci_credentials_secret.name},
         },
     }
+    LOGGER.info(f"Submitting evalcard OCI export job with exports: {payload['exports']}")
 
     data = submit_evalhub_job(
         host=evalhub_mt_route.host,
