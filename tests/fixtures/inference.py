@@ -12,12 +12,13 @@ from ocp_resources.namespace import Namespace
 from ocp_resources.resource import ResourceEditor
 from ocp_resources.serving_runtime import ServingRuntime
 from pytest_testconfig import py_config
-from timeout_sampler import retry
+from timeout_sampler import TimeoutExpiredError, retry
 
 from tests.fixtures.image_constants import FixturesImages
 from utilities.constants import (
     KServeDeploymentType,
     LLMdInferenceSimConfig,
+    Timeout,
 )
 from utilities.inference_utils import create_isvc
 from utilities.infra import get_data_science_cluster, wait_for_dsc_status_ready
@@ -192,11 +193,14 @@ def patched_dsc_kserve_headed(
 ) -> Generator[DataScienceCluster]:
     """Configure KServe Services to work in Headed mode i.e. using the Service port instead of the Pod port"""
 
-    def _kserve_status(dsc_resource: DataScienceCluster) -> str:
-        condition = next(
+    def _kserve_condition(dsc_resource: DataScienceCluster) -> dict[str, Any] | None:
+        return next(
             filter(lambda condition: condition["type"] == "KserveReady", dsc_resource.instance.status["conditions"]),
             None,
         )
+
+    def _kserve_status(dsc_resource: DataScienceCluster) -> str:
+        condition = _kserve_condition(dsc_resource=dsc_resource)
         if condition is None:
             raise ValueError("KserveReady condition not found in DSC status")
         return condition["status"]
@@ -205,18 +209,31 @@ def patched_dsc_kserve_headed(
     def _wait_for_kserve_upgrade(dsc_resource: DataScienceCluster):
         return _kserve_status(dsc_resource) != "True"
 
-    @retry(wait_timeout=60, sleep=5)
+    @retry(wait_timeout=Timeout.TIMEOUT_5MIN, sleep=5)
     def _wait_for_kserve_ready(dsc_resource: DataScienceCluster) -> bool:
         return _kserve_status(dsc_resource) == "True"
 
     dsc = get_data_science_cluster(client=admin_client)
     if dsc.instance.spec.components.kserve.rawDeploymentServiceConfig != "Headed":
+        LOGGER.info(
+            f"DSC {dsc.name} KserveReady condition before switching to Headed: {_kserve_condition(dsc_resource=dsc)}"
+        )
         with ResourceEditor(
             patches={dsc: {"spec": {"components": {"kserve": {"rawDeploymentServiceConfig": "Headed"}}}}}
         ):
             _wait_for_kserve_upgrade(dsc_resource=dsc)
             kserve_controller_manager_deployment.wait_for_replicas()
-            _wait_for_kserve_ready(dsc_resource=dsc)
+            try:
+                _wait_for_kserve_ready(dsc_resource=dsc)
+            except TimeoutExpiredError:
+                kserve_condition = _kserve_condition(dsc_resource=dsc)
+                LOGGER.error(
+                    f"DSC {dsc.name} KserveReady did not become True within {Timeout.TIMEOUT_5MIN}s after setting "
+                    f"rawDeploymentServiceConfig=Headed. KserveReady condition: {kserve_condition}; "
+                    f"{kserve_controller_manager_deployment.name} status: "
+                    f"{kserve_controller_manager_deployment.instance.status}"
+                )
+                raise
             yield dsc
     else:
         LOGGER.info("DSC already configured for Headed mode")

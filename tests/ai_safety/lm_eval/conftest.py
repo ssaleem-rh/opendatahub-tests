@@ -3,6 +3,7 @@ from collections.abc import Generator
 from typing import Any
 
 import pytest
+import structlog
 from kubernetes.dynamic import DynamicClient
 from ocp_resources.data_science_cluster import DataScienceCluster
 from ocp_resources.deployment import Deployment
@@ -41,6 +42,8 @@ from utilities.image_constants import SharedImages
 from utilities.inference_utils import create_isvc
 from utilities.resources.route import Route as TLSRoute
 from utilities.serving_runtime import ServingRuntimeFromTemplate
+
+LOGGER = structlog.get_logger(name=__name__)
 
 VLLM_EMULATOR: str = "vllm-emulator"
 VLLM_EMULATOR_PORT: int = 8000
@@ -707,12 +710,15 @@ def lmeval_hf_access_token(
     model_namespace: Namespace,
     pytestconfig: Config,
 ) -> Secret:
+    """Secret holding the HuggingFace access token consumed by LMEvalJob pods as HF_TOKEN."""
     hf_access_token = pytestconfig.option.hf_access_token
     if not hf_access_token:
-        raise MissingParameter(
+        message = (
             "HF access token is not set. "
             "Either pass with `--hf-access-token` or set `HF_ACCESS_TOKEN` environment variable"
         )
+        LOGGER.error(f"{message}; LMEvalJob pods need it as HF_TOKEN to pull models, datasets and tokenizers")
+        raise MissingParameter(message)
     with Secret(
         client=admin_client,
         name="hf-secret",
