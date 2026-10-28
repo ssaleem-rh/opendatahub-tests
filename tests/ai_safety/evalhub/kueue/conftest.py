@@ -29,6 +29,7 @@ from tests.ai_safety.evalhub.constants import (
 )
 from tests.ai_safety.evalhub.kueue.constants import (
     KUEUE_CPU_QUOTA,
+    KUEUE_EVALHUB_CR_NAME,
     KUEUE_MEMORY_QUOTA,
     VLLM_EMULATOR,
     VLLM_EMULATOR_IMAGE,
@@ -161,7 +162,7 @@ def evalhub_kueue_cr(
 
     with EvalHub(
         client=admin_client,
-        name="evalhub-mt",
+        name=KUEUE_EVALHUB_CR_NAME,
         namespace=evalhub_kueue_model_namespace.name,
         database={"type": "sqlite"},
         collections=["leaderboard-v2"],
@@ -642,6 +643,7 @@ def evalhub_kueue_tenant_rbac(
             func=tenant_rbac_ready,
             admin_client=admin_client,
             namespace=evalhub_kueue_namespace.name,
+            evalhub_instance_name=KUEUE_EVALHUB_CR_NAME,
         ):
             if ready:
                 LOGGER.info(f"Operator RBAC provisioned in {evalhub_kueue_namespace.name}")

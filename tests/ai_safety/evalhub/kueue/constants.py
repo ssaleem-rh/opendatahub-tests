@@ -5,5 +5,10 @@ from tests.ai_safety.image_constants import AiSafetyImages
 KUEUE_CPU_QUOTA = "3"
 KUEUE_MEMORY_QUOTA = "5Gi"
 
+# Distinct from EVALHUB_MT_CR_NAME: the operator names tenant RoleBindings
+# '{instance.Name}-{tenant_ns}-...' and rewrites their subjects on every reconcile, so two EvalHub
+# instances sharing a name keep overwriting each other's bindings in every tenant namespace.
+KUEUE_EVALHUB_CR_NAME = "evalhub-kueue"
+
 VLLM_EMULATOR = "vllm-emulator"
 VLLM_EMULATOR_IMAGE: str = AiSafetyImages.VLLM_EMULATOR

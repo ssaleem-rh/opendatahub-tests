@@ -24,69 +24,14 @@ from pytest_testconfig import config as py_config
 
 from tests.ai_safety.evalhub.constants import (
     EVALHUB_JOBS_PATH,
-    EVALHUB_TENANT_LABEL_KEY,
-    EVALHUB_TENANT_LABEL_VALUE,
 )
 from tests.ai_safety.evalhub.utils import (
-    MLflowWithWorkspaces,
     build_evalhub_job_payload,
     build_headers,
-    label_selector_matches,
     submit_evalhub_job,
 )
 
 MLFLOW_SERVICE_PORT = 8443
-
-
-@pytest.fixture(scope="class")
-def mlflow_deployment_ready(
-    admin_client: DynamicClient,
-    tenant_a_namespace: Namespace,
-) -> Generator[Deployment, Any, Any]:
-    """Reuse an existing MLflow deployment, or create an MLflow instance for this class if absent.
-
-    The MLflow operator must already be enabled in the DSC.
-    """
-    namespace = py_config["applications_namespace"]
-    mlflow_instance = MLflowWithWorkspaces(
-        client=admin_client,
-        name="mlflow",
-    )
-    deployment = Deployment(
-        client=admin_client,
-        name="mlflow",
-        namespace=namespace,
-    )
-    if mlflow_instance.exists:
-        existing_selector = mlflow_instance.instance.to_dict().get("spec", {}).get("workspaceLabelSelector")
-        tenant_labels = dict(tenant_a_namespace.instance.metadata.labels or {})
-        if existing_selector is None or not label_selector_matches(selector=existing_selector, labels=tenant_labels):
-            pytest.fail(
-                f"Existing MLflow instance 'mlflow' has workspaceLabelSelector {existing_selector}, "
-                f"which does not select tenant namespace {tenant_a_namespace.name} labeled {tenant_labels}"
-            )
-        deployment.wait_for_replicas(timeout=300)
-        yield deployment
-        return
-
-    with MLflowWithWorkspaces(
-        client=admin_client,
-        name="mlflow",
-        storage={
-            "accessModes": ["ReadWriteOnce"],
-            "resources": {"requests": {"storage": "1Gi"}},
-        },
-        backend_store_uri="sqlite:////mlflow/mlflow.db",
-        artifacts_destination="file:///mlflow/artifacts",
-        serve_artifacts=True,
-        workspace_label_selector={
-            "matchLabels": {EVALHUB_TENANT_LABEL_KEY: EVALHUB_TENANT_LABEL_VALUE},
-        },
-        image={"imagePullPolicy": "Always"},
-        wait_for_resource=True,
-    ):
-        deployment.wait_for_replicas(timeout=300)
-        yield deployment
 
 
 @pytest.fixture(scope="class")

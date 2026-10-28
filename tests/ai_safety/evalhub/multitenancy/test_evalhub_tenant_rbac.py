@@ -92,7 +92,10 @@ class TestEvalHubTenantRBAC:
         assert subjects[0].kind == "ServiceAccount"
         assert subjects[0].name == f"{EVALHUB_MT_CR_NAME}-service"
         assert subjects[0].namespace == model_namespace.name, (
-            f"Expected SA namespace '{model_namespace.name}', got '{subjects[0].namespace}'"
+            f"Expected SA namespace '{model_namespace.name}', got '{subjects[0].namespace}' on RoleBinding "
+            f"'{rb.name}'. The operator names tenant RoleBindings '<instance>-<tenant-ns>-...', so another "
+            f"EvalHub CR named '{EVALHUB_MT_CR_NAME}' in namespace '{subjects[0].namespace}' is reconciling "
+            "the same binding and overwrote its subject."
         )
 
     def test_job_config_role_binding(
