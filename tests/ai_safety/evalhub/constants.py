@@ -168,6 +168,11 @@ EVALHUB_METRICS_SERVICE_SUFFIX: str = "-metrics"
 EVALHUB_METRICS_PORT: int = 8081
 EVALHUB_METRICS_COMPONENT_LABEL: str = "metrics"
 EVALHUB_SCRAPE_INTERVAL: str = "30s"
+# PromQL regex for the HTTP request counter: legacy name, or the OTEL-bridged name
+# (http_server_request_count_total) exposed by current eval-hub releases
+EVALHUB_REQUEST_COUNT_METRIC_REGEX: str = "http_requests_total|http_server_request_count.*"
+# Time allowed for user-workload Prometheus to discover a new ServiceMonitor and scrape it
+EVALHUB_METRICS_QUERY_TIMEOUT: int = 300
 
 # OTEL Collector constants
 OTEL_COLLECTOR_NAMESPACE: str = "otel-collector"
