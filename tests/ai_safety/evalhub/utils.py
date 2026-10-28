@@ -1,6 +1,8 @@
+import os
 import socket
 from typing import Any, Final
 
+import portforward
 import pytest
 import requests
 import structlog
@@ -12,6 +14,7 @@ from ocp_resources.job import Job
 from ocp_resources.mlflow import MLflow
 from ocp_resources.pod import Pod
 from ocp_resources.role_binding import RoleBinding
+from ocp_resources.service import Service
 from ocp_resources.service_account import ServiceAccount
 from timeout_sampler import TimeoutExpiredError, TimeoutSampler
 
@@ -34,6 +37,8 @@ from tests.ai_safety.evalhub.constants import (
     EVALHUB_K8S_LABEL_COMPONENT_VALUE,
     EVALHUB_K8S_LABEL_JOB_ID,
     EVALHUB_LOG_CONTENT_TYPE,
+    EVALHUB_METRICS_PATH,
+    EVALHUB_METRICS_PORT,
     EVALHUB_MT_CR_NAME,
     EVALHUB_PROVIDERS_PATH,
     EVALHUB_VLLM_EMULATOR_PORT,
@@ -1733,6 +1738,62 @@ def fetch_operator_metrics(
         verify=False,
         timeout=10,
     )
+    response.raise_for_status()
+    return response.text
+
+
+def fetch_evalhub_metrics(admin_client: DynamicClient, metrics_service: Service) -> str:
+    """Fetch raw Prometheus text from the cluster-internal EvalHub metrics endpoint.
+
+    The metrics Service has no Route and its DNS name only resolves inside the cluster.
+    When the tests run inside a pod the Service DNS name is used directly; otherwise
+    (for example from a workstation) the request goes through a port-forward to a
+    pod selected by the Service.
+
+    Args:
+        admin_client: Cluster client used to look up the pods backing the metrics Service.
+        metrics_service: The EvalHub metrics Service created by the operator.
+
+    Returns:
+        Raw Prometheus text-format string from the /metrics endpoint.
+
+    Raises:
+        AssertionError: If no pod backs the metrics Service.
+    """
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        url = (
+            f"http://{metrics_service.name}.{metrics_service.namespace}"
+            f".svc.cluster.local:{EVALHUB_METRICS_PORT}{EVALHUB_METRICS_PATH}"
+        )
+        LOGGER.info(f"Running in-cluster, scraping EvalHub metrics directly from {url}")
+        response = requests.get(url=url, timeout=10)
+        response.raise_for_status()
+        return response.text
+
+    selector = ",".join(f"{key}={value}" for key, value in dict(metrics_service.instance.spec.selector).items())
+    pods = list(Pod.get(client=admin_client, namespace=metrics_service.namespace, label_selector=selector))
+    assert pods, (
+        f"No pods found for metrics Service '{metrics_service.name}' in namespace "
+        f"'{metrics_service.namespace}' with selector '{selector}'"
+    )
+    pod_name = pods[0].name
+
+    with socket.socket() as probe_socket:
+        probe_socket.bind(("127.0.0.1", 0))  # noqa: FCN001
+        local_port = probe_socket.getsockname()[1]
+
+    LOGGER.info(
+        f"Running outside the cluster, port-forwarding to pod {pod_name} "
+        f"port {EVALHUB_METRICS_PORT} on local port {local_port}"
+    )
+    with portforward.forward(
+        pod_or_service=pod_name,
+        namespace=metrics_service.namespace,
+        from_port=local_port,
+        to_port=EVALHUB_METRICS_PORT,
+        waiting=20,
+    ):
+        response = requests.get(url=f"http://127.0.0.1:{local_port}{EVALHUB_METRICS_PATH}", timeout=10)
     response.raise_for_status()
     return response.text
 

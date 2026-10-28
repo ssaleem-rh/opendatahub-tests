@@ -1,13 +1,14 @@
 import pytest
 import requests
+from kubernetes.dynamic import DynamicClient
 from ocp_resources.route import Route
 from ocp_resources.service import Service
 
 from tests.ai_safety.evalhub.constants import (
     EVALHUB_HEALTH_PATH,
-    EVALHUB_METRICS_PATH,
-    EVALHUB_METRICS_PORT,
+    EVALHUB_HTTP_METRIC_NAMES,
 )
+from tests.ai_safety.evalhub.utils import fetch_evalhub_metrics
 from utilities.guardrails import get_auth_headers
 
 
@@ -27,32 +28,37 @@ class TestEvalHubMetrics:
 
     def test_evalhub_metrics_endpoint(
         self,
+        admin_client: DynamicClient,
         current_client_token: str,
         evalhub_ca_bundle_file: str,
+        evalhub_route: Route,
         evalhub_metrics_service: Service,
     ) -> None:
-        """Verify /metrics returns 200 and includes expected Prometheus metrics.
+        """Given: a running EvalHub instance that has served a request.
+        When: the cluster-internal /metrics endpoint on the metrics Service is scraped.
+        Then: it returns Prometheus text including the HTTP request, duration and in-flight metrics.
 
-        The metrics endpoint is on the cluster-internal port 8081 with no Route,
-        so it is accessed via the service DNS name rather than the API Route.
+        The metrics endpoint is on the cluster-internal port 8081 with no Route, so it is
+        reached through the pod backing the metrics Service (port-forward, or Service DNS
+        when the tests run inside the cluster).
         """
-        url = (
-            f"http://{evalhub_metrics_service.name}"
-            f".{evalhub_metrics_service.namespace}"
-            f".svc.cluster.local:{EVALHUB_METRICS_PORT}{EVALHUB_METRICS_PATH}"
+        health_resp = requests.get(
+            url=f"https://{evalhub_route.host}{EVALHUB_HEALTH_PATH}",
+            headers=get_auth_headers(token=current_client_token),
+            verify=evalhub_ca_bundle_file,
+            timeout=10,
         )
-        response = requests.get(url=url, timeout=10)
-        assert response.status_code == 200, f"Expected 200 from /metrics, got {response.status_code}"
-        body = response.text
-        for metric in (
-            "http_requests_total",
-            "http_request_duration_seconds",
-            "http_requests_in_flight",
-        ):
-            assert metric in body, f"Expected metric '{metric}' not found in /metrics response"
+        assert health_resp.status_code == 200, f"Expected 200 from health endpoint, got {health_resp.status_code}"
+
+        body = fetch_evalhub_metrics(admin_client=admin_client, metrics_service=evalhub_metrics_service)
+        for metric_names in EVALHUB_HTTP_METRIC_NAMES:
+            assert any(name in body for name in metric_names), (
+                f"None of the metric names {metric_names} found in /metrics response"
+            )
 
     def test_evalhub_metrics_recorded_for_requests(
         self,
+        admin_client: DynamicClient,
         current_client_token: str,
         evalhub_ca_bundle_file: str,
         evalhub_route: Route,
@@ -75,13 +81,7 @@ class TestEvalHubMetrics:
         assert health_resp.status_code == 200
 
         # Scrape metrics from the internal service and verify the health path appears
-        metrics_url = (
-            f"http://{evalhub_metrics_service.name}"
-            f".{evalhub_metrics_service.namespace}"
-            f".svc.cluster.local:{EVALHUB_METRICS_PORT}{EVALHUB_METRICS_PATH}"
-        )
-        metrics_resp = requests.get(url=metrics_url, timeout=10)
-        assert metrics_resp.status_code == 200
-        assert EVALHUB_HEALTH_PATH in metrics_resp.text, (
+        metrics_text = fetch_evalhub_metrics(admin_client=admin_client, metrics_service=evalhub_metrics_service)
+        assert EVALHUB_HEALTH_PATH in metrics_text, (
             f"Expected request count for '{EVALHUB_HEALTH_PATH}' in /metrics output"
         )

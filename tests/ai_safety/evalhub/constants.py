@@ -9,6 +9,14 @@ EVALHUB_SERVICE_PORT: int = 8443
 EVALHUB_CONTAINER_PORT: int = 8080
 EVALHUB_HEALTH_PATH: str = "/api/v1/health"
 EVALHUB_METRICS_PATH: str = "/metrics"
+# Each tuple lists the accepted names of one HTTP server metric. The first entry is the legacy
+# name, the second the OTEL-bridged name exposed by current eval-hub releases
+# (see eval-hub OTEL.md and tests/features/metrics.feature).
+EVALHUB_HTTP_METRIC_NAMES: tuple[tuple[str, ...], ...] = (
+    ("http_requests_total", "http_server_request_count"),
+    ("http_request_duration_seconds", "http_server_request_duration"),
+    ("http_requests_in_flight", "http_server_active_requests"),
+)
 EVALHUB_PROVIDERS_PATH: str = "/api/v1/evaluations/providers"
 EVALHUB_JOBS_PATH: str = "/api/v1/evaluations/jobs"
 EVALHUB_JOB_LOGS_PATH_TEMPLATE: str = "/api/v1/evaluations/jobs/{job_id}/logs"
