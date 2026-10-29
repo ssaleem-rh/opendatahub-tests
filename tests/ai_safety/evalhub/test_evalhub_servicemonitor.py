@@ -1,16 +1,8 @@
-from typing import Any
-
 import pytest
-import requests
-import structlog
-import yaml
 from kubernetes.dynamic import DynamicClient
-from ocp_resources.config_map import ConfigMap
 from ocp_resources.deployment import Deployment
 from ocp_resources.evalhub import EvalHub
 from ocp_resources.namespace import Namespace
-from ocp_resources.pod import Pod
-from ocp_resources.route import Route
 from ocp_resources.service import Service
 from ocp_resources.service_monitor import ServiceMonitor
 from ocp_utilities.monitoring import Prometheus
@@ -19,74 +11,12 @@ from timeout_sampler import TimeoutExpiredError, TimeoutSampler
 from tests.ai_safety.evalhub.constants import (
     EVALHUB_APP_LABEL,
     EVALHUB_COMPONENT_LABEL,
-    EVALHUB_HEALTH_PATH,
     EVALHUB_METRICS_COMPONENT_LABEL,
     EVALHUB_METRICS_PORT,
-    EVALHUB_METRICS_QUERY_TIMEOUT,
     EVALHUB_METRICS_SERVICE_SUFFIX,
-    EVALHUB_REQUEST_COUNT_METRIC_REGEX,
     EVALHUB_SCRAPE_INTERVAL,
 )
-from utilities.guardrails import get_auth_headers
 from utilities.monitoring import validate_metrics_field
-
-LOGGER = structlog.get_logger(name=__name__)
-
-USER_WORKLOAD_MONITORING_NAMESPACE: str = "openshift-user-workload-monitoring"
-
-
-def query_prometheus_result(prometheus: Prometheus, query: str) -> list[dict[str, Any]]:
-    """Run an instant PromQL query and return the result series.
-
-    Args:
-        prometheus: Prometheus client pointing at the Thanos Querier.
-        query: PromQL expression.
-
-    Returns:
-        List of result series, or an empty list when the query fails or returns nothing.
-    """
-    try:
-        return list(prometheus.query(query=query).get("data", {}).get("result", []))
-    except (requests.exceptions.RequestException, ValueError) as exc:
-        LOGGER.warning(f"Prometheus query '{query}' failed: {exc}")
-        return []
-
-
-def describe_user_workload_monitoring(admin_client: DynamicClient, namespace: Namespace) -> list[str]:
-    """Describe whether user-workload monitoring is able to scrape the given namespace.
-
-    Args:
-        admin_client: Cluster client.
-        namespace: Namespace holding the EvalHub ServiceMonitor.
-
-    Returns:
-        Human-readable findings, one per line.
-    """
-    findings: list[str] = []
-
-    monitoring_config = ConfigMap(
-        client=admin_client, name="cluster-monitoring-config", namespace="openshift-monitoring"
-    )
-    if monitoring_config.exists:
-        config_yaml = yaml.safe_load(monitoring_config.instance.data.get("config.yaml", "")) or {}
-        findings.append(f"cluster-monitoring-config enableUserWorkload={config_yaml.get('enableUserWorkload')}")
-    else:
-        findings.append(
-            "ConfigMap openshift-monitoring/cluster-monitoring-config not found: user-workload monitoring is disabled"
-        )
-
-    uwm_pods = [
-        f"{pod.name}={pod.instance.status.phase}"
-        for pod in Pod.get(client=admin_client, namespace=USER_WORKLOAD_MONITORING_NAMESPACE)
-    ]
-    findings.append(f"Pods in {USER_WORKLOAD_MONITORING_NAMESPACE}: {uwm_pods or 'none'}")
-
-    namespace_labels = dict(namespace.instance.metadata.labels or {})
-    findings.append(
-        f"Namespace {namespace.name} label openshift.io/cluster-monitoring="
-        f"{namespace_labels.get('openshift.io/cluster-monitoring')} (must not be 'true' for user-workload scraping)"
-    )
-    return findings
 
 
 @pytest.mark.parametrize(
@@ -208,61 +138,24 @@ class TestEvalHubServiceMonitor:
 
     def test_metrics_queryable_via_thanos(
         self,
-        admin_client: DynamicClient,
-        model_namespace: Namespace,
-        current_client_token: str,
-        evalhub_ca_bundle_file: str,
-        evalhub_route: Route,
         evalhub_cr: EvalHub,
         evalhub_service_monitor: ServiceMonitor,
         prometheus: Prometheus,
     ) -> None:
-        """Given: a running EvalHub with a ServiceMonitor that has served an API request.
-        When: the HTTP request counter is queried through the Thanos Querier.
-        Then: the series for the EvalHub metrics job is returned with a value of at least 0.
+        """Verify EvalHub-owned metrics are queryable through the Thanos Querier.
+
+        HTTP request counters are only emitted when OTEL metrics are enabled
+        (http_server_request_count_total); this CR has no otel spec, so use an
+        always-registered EvalHub gauge instead.
         """
-        job_name = f"{evalhub_cr.name}{EVALHUB_METRICS_SERVICE_SUFFIX}"
-
-        # Request counters only get a series after the first request, so generate one
-        health_resp = requests.get(
-            url=f"https://{evalhub_route.host}{EVALHUB_HEALTH_PATH}",
-            headers=get_auth_headers(token=current_client_token),
-            verify=evalhub_ca_bundle_file,
-            timeout=10,
+        sm_name = f"{evalhub_cr.name}{EVALHUB_METRICS_SERVICE_SUFFIX}"
+        validate_metrics_field(
+            prometheus=prometheus,
+            metrics_query=f'evalhub_evaluation_queue_depth{{job="{sm_name}"}}',
+            expected_value="0",
+            greater_than=True,
+            timeout=120,
         )
-        assert health_resp.status_code == 200, f"Expected 200 from health endpoint, got {health_resp.status_code}"
-
-        LOGGER.info(f"ServiceMonitor '{job_name}' spec: {evalhub_service_monitor.instance.spec.to_dict()}")
-        monitoring_findings = describe_user_workload_monitoring(admin_client=admin_client, namespace=model_namespace)
-        for finding in monitoring_findings:
-            LOGGER.info(finding)
-
-        request_count_query = f'{{__name__=~"{EVALHUB_REQUEST_COUNT_METRIC_REGEX}",job="{job_name}"}}'
-        try:
-            validate_metrics_field(
-                prometheus=prometheus,
-                metrics_query=request_count_query,
-                expected_value="0",
-                greater_than=True,
-                timeout=EVALHUB_METRICS_QUERY_TIMEOUT,
-            )
-        except TimeoutExpiredError:
-            up_series = query_prometheus_result(prometheus=prometheus, query=f'up{{job="{job_name}"}}')
-            namespace_up_series = query_prometheus_result(
-                prometheus=prometheus, query=f'up{{namespace="{model_namespace.name}"}}'
-            )
-            scraped_names = query_prometheus_result(
-                prometheus=prometheus, query=f'count by (__name__) ({{job="{job_name}"}})'
-            )
-            pytest.fail(
-                f"No series matched '{request_count_query}' within {EVALHUB_METRICS_QUERY_TIMEOUT}s. "
-                f"up for job '{job_name}': {up_series}; "
-                f"up in namespace '{model_namespace.name}': {namespace_up_series}; "
-                f"metric names scraped for the job: {[item['metric'].get('__name__') for item in scraped_names]}; "
-                f"monitoring state: {monitoring_findings}. "
-                "An empty 'up' result means user-workload Prometheus has not discovered the target; "
-                "scraped names without a request counter mean eval-hub exposes a different metric name."
-            )
 
 
 @pytest.mark.parametrize(
