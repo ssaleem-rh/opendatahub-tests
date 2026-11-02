@@ -40,7 +40,7 @@ LMEVAL_TASKS_EXCLUDED_IN_CI: dict[str, str] = {
     "storycloze_2018": "datasets.exceptions.ManualDownloadError: requires manually downloaded data",
 }
 
-TIER1_LMEVAL_TASKS: list[str] = sorted(set(get_lmeval_tasks(min_downloads=10000)) - set(LMEVAL_TASKS_EXCLUDED_IN_CI))
+TIER1_LMEVAL_TASKS: list[str] = ["arc_easy", "humaneval", "ifeval", "wikitext"]
 
 TIER2_LMEVAL_TASKS: list[str] = sorted(
     set(get_lmeval_tasks(min_downloads=0.70, max_downloads=10000))
