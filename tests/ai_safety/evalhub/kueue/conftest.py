@@ -265,6 +265,15 @@ def installed_kueue_operator(
     """Install the Red Hat build of Kueue operator if not already present.
 
     Uninstalls only if this fixture performed the installation.
+
+    Known issue (2026-11-24): uninstall_operator() in ocp_utilities crashes with
+    `TypeError: Resource.get() missing 1 required positional argument: 'client'`
+    (ocp_utilities/operators.py:307 calls Operator.get(dyn_client=...), but the
+    pinned ocp_resources version requires Resource.get(client=...)). This aborts
+    teardown after the Subscription/OperatorGroup are deleted but before the CSV
+    is, leaving an orphaned kueue-operator CSV that makes the next session's
+    fresh Subscription fail OLM resolution (ConstraintsNotSatisfiable) until the
+    orphaned CSV is deleted manually.
     """
     package_name = "kueue-operator"
     channel = "stable-v1.3"

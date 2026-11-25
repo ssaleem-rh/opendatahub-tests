@@ -525,6 +525,18 @@ def wait_for_queue_active(queue: Resource, timeout: int = Timeout.TIMEOUT_2MIN) 
 
     Raises:
         TimeoutExpiredError: If the queue does not become Active in time.
+
+    Known issue (2026-11-24): kueue-operator.v1.3.2 (channel stable-v1.3) can get
+    stuck in a reconcile loop where it repeatedly re-applies the
+    kueue-controller-manager Deployment (spurious diffs forcing dnsPolicy/
+    restartPolicy/schedulerName/serviceAccount to null), killing and recreating
+    controller pods every few seconds. The controller never holds leadership long
+    enough to reconcile ClusterQueue objects, so this wait times out with
+    conditions=None even on a freshly installed operator. Confirmed via
+    kueue-controller-manager pod events/logs showing repeated
+    "Deployment ... was updated" within this wait window. Not caused by the
+    caller; if this fires, check for churning kueue-controller-manager pods
+    before assuming a test/fixture bug.
     """
 
     def _is_active() -> bool:

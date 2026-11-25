@@ -28,7 +28,7 @@ LOGGER = structlog.get_logger(name=__name__)
 class TestEvalHubKueueQueueRecovery:
     """Verify the queue accepts new jobs after being stopped and re-enabled."""
 
-    def test_new_job_succeeds_after_queue_reenabled(
+    def test_gated_job_fails_and_new_job_succeeds_after_queue_reenabled(
         self,
         admin_client: DynamicClient,
         evalhub_kueue_namespace: Namespace,
@@ -36,15 +36,13 @@ class TestEvalHubKueueQueueRecovery:
         evalhub_kueue_vllm_service: Service,
         evalhub_kueue_request_common: dict[str, str],
     ) -> None:
-        """TC-QM-001: A gated job resumes and completes after a stopped ClusterQueue is re-enabled.
+        """TC-QM-001: A new job completes after a stopped ClusterQueue is re-enabled.
 
-        Kueue does not discard a workload that is held while its ClusterQueue is
-        stopped (`HoldAndDrain`); the workload stays pending until the queue is
-        re-enabled, at which point Kueue admits it and the job runs to
-        completion. EvalHub does not proactively fail inadmissible jobs. This
-        test verifies both properties: the originally-gated job recovers and
-        completes once the queue is restored, and a freshly submitted job also
-        completes.
+        A job submitted while the ClusterQueue is stopped (`HoldAndDrain`) is
+        failed by the EvalHub operator once its Kueue workload becomes
+        inadmissible (QuotaReserved=False, reason=Inadmissible); it does not
+        recover when the queue is re-enabled. After the queue is re-enabled,
+        new jobs are admitted and complete normally.
         """
         common = evalhub_kueue_request_common
 
@@ -77,7 +75,14 @@ class TestEvalHubKueueQueueRecovery:
                     raise
 
             gated_result = wait_for_evalhub_job(**common, job_id=gated_job_id, timeout=Timeout.TIMEOUT_10MIN)
-            validate_evalhub_job_completed(job_data=gated_result)
+            assert gated_result["status"]["state"] == "failed", (
+                f"Expected gated job {gated_job_id} to be failed by the operator once its "
+                f"workload became inadmissible, got status: {gated_result['status']}"
+            )
+            assert "cannot be admitted to the requested queue" in str(gated_result["status"]), (
+                f"Expected inadmissible-queue message in status of job {gated_job_id}, "
+                f"got status: {gated_result['status']}"
+            )
 
             data = submit_evalhub_job(
                 **common,
